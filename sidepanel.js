@@ -458,12 +458,16 @@ async function checkCurrentTab() {
   try {
     // Try multiple strategies to find the Bilibili tab
     let tab = null;
+    const diagnostics = [];
 
     // Strategy 1: Active tab in last focused window
     let tabs = await chrome.tabs.query({
       active: true,
       lastFocusedWindow: true,
     });
+    diagnostics.push(
+      "活动标签页: " + (tabs[0]?.url || "(无 URL 权限或非网页)")
+    );
     if (tabs[0]?.url?.includes("bilibili.com/video/")) {
       tab = tabs[0];
     }
@@ -486,7 +490,11 @@ async function checkCurrentTab() {
     debugLog("[dk-bilidown Panel] Found tab:", tab?.id, tab?.url);
 
     if (!tab?.url) {
-      showState("welcome");
+      showWelcome(
+        "未检测到 B 站视频。\n" +
+          diagnostics.join("\n") +
+          "\n提示：需要打开 https://www.bilibili.com/video/BV… 格式的视频页面。"
+      );
       return;
     }
 
@@ -521,11 +529,15 @@ async function checkCurrentTab() {
 
       startBilidown(videoId, tab.url);
     } else {
-      showState("welcome");
+      showWelcome(
+        "未匹配到 B 站视频地址。\n当前页面: " +
+          (tab.url || "(无 URL)") +
+          "\n提示：需要 https://www.bilibili.com/video/BV… 格式（暂不支持番剧/直播页）。"
+      );
     }
   } catch (error) {
     console.error("Tab check error:", error);
-    showState("welcome");
+    showWelcome("检测出错: " + (error?.message || error));
   }
 }
 
@@ -550,7 +562,7 @@ function extractVideoId(url) {
 // ============================================================
 
 async function startBilidown(videoId, videoUrl) {
-  const generation = ++generation;
+  const gen = ++generation;
   // Check if we already have this video loaded in memory
   if (videoId === currentVideoId && currentAnalysis) {
     showState("results");
@@ -566,7 +578,7 @@ async function startBilidown(videoId, videoUrl) {
 
   // Check cache for this video
   const cached = await loadFromCache(videoId);
-  if (generation !== generation) return;
+  if (gen !== generation) return;
   if (cached) {
     debugLog("Loading from cache:", videoId);
     currentVideoId = videoId;
@@ -651,7 +663,7 @@ async function startBilidown(videoId, videoUrl) {
     ),
     videoUrl: videoUrl,
   });
-  if (generation !== generation || videoId !== currentVideoId) return;
+  if (gen !== generation || videoId !== currentVideoId) return;
 
   if (!transcriptResult.success) {
     const detail = transcriptResult.message || transcriptResult.error;
@@ -1101,6 +1113,15 @@ async function saveFullSummaryAsNote() {
 // ============================================================
 // UI STATE MANAGEMENT
 // ============================================================
+
+function showWelcome(message) {
+  const hint = document.getElementById("welcomeHint");
+  if (hint) {
+    hint.style.display = message ? "block" : "none";
+    hint.textContent = message || "";
+  }
+  showState("welcome");
+}
 
 function showState(state) {
   document.getElementById("welcomeState").style.display =

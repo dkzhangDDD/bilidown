@@ -1034,6 +1034,20 @@ body {
   max-width: 270px;
 }
 
+/* Diagnostic hint shown when no Bilibili video is detected */
+.welcome-hint {
+  font-family: var(--font-reading);
+  font-size: 11.5px;
+  color: var(--text-muted, #8a8f98);
+  line-height: 1.6;
+  background: rgba(0, 0, 0, 0.04);
+  border-radius: 8px;
+  padding: 10px 12px;
+  max-width: 280px;
+  word-break: break-all;
+  text-align: left;
+}
+
 /* ============================================================
    SHARE / ACTIONS BAR
    ============================================================ */
