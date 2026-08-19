@@ -7,7 +7,7 @@ bilidown 会直接显示在哔哩哔哩视频页面中。配置阿里云百炼 A
 
 它不是简单地把整段字幕丢给 AI，而是围绕 B 站真实使用场景处理了几个关键问题：**视频切换、分 P / 合集识别、时间戳跳转、播放位置跟随、全屏笔记、中文章节和多格式导出。**
 
-b站教学视频链接：https://b23.tv/xls42lN
+
 > [!IMPORTANT]
 > 本项目基于 [zarazhangrui/youtube-digest](https://github.com/zarazhangrui/youtube-digest) 二次开发，针对哔哩哔哩网页结构和国内服务重新适配，不是哔哩哔哩官方产品。
 
