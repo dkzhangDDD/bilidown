@@ -382,8 +382,11 @@ function setupEventListeners() {
 
   // Transcript actions
   document
-    .getElementById("copyFeishuBtn")
-    ?.addEventListener("click", copyForFeishu);
+    .getElementById("copyTranscriptBtn")
+    ?.addEventListener("click", copyTranscript);
+  document
+    .getElementById("saveTranscriptNoteBtn")
+    ?.addEventListener("click", saveTranscriptAsNote);
   document
     .getElementById("exportTranscriptBtn")
     ?.addEventListener("click", exportTranscript);
@@ -986,24 +989,79 @@ function buildHtmlExport() {
   </style></head><body><main class="page"><h1>${escapeHtml(currentVideoTitle || "B站视频学习笔记")}</h1><div class="meta">UP主：${escapeHtml(currentChannelName || "未知")} · <a href="${escapeHtml(currentCanonicalVideoUrl())}">打开原视频</a></div>${currentVideoDescription ? `<h2>视频简介</h2><p>${escapeHtml(currentVideoDescription)}</p>` : ""}${chapters ? `<h2>AI 章节</h2>${chapters}` : ""}${quotes ? `<h2>关键观点</h2>${quotes}` : ""}<h2>完整字幕</h2>${entries.map((entry) => `<div class="line"><a class="time" href="${escapeHtml(entry.url)}">${escapeHtml(entry.timestamp)}</a><div>${escapeHtml(entry.text)}</div></div>`).join("")}<div class="footer">由 bilidown · dk 二次开发版导出</div></main></body></html>`;
 }
 
-async function copyForFeishu() {
-  const html = buildHtmlExport().match(/<main class="page">([\s\S]*?)<\/main>/)?.[1] || "";
-  const plain = buildMarkdownExport();
-  const btn = document.getElementById("copyFeishuBtn");
+/**
+ * Copies the full transcript (plain text, no timestamps) to the clipboard.
+ */
+async function copyTranscript() {
+  const btn = document.getElementById("copyTranscriptBtn");
   const original = btn.textContent;
-  try {
-    await navigator.clipboard.write([
-      new ClipboardItem({
-        "text/html": new Blob([html], { type: "text/html" }),
-        "text/plain": new Blob([plain], { type: "text/plain" }),
-      }),
-    ]);
-    btn.textContent = "✓ 已复制，去飞书粘贴";
-  } catch {
-    await copyToClipboard(plain);
-    btn.textContent = "✓ 已复制 Markdown";
+  const text =
+    currentTranscriptText ||
+    (currentTranscript || []).map((entry) => entry.text).join(" ") ||
+    "";
+  if (!text.trim()) {
+    btn.textContent = "暂无内容";
+    setTimeout(() => (btn.textContent = original), 1500);
+    return;
   }
-  setTimeout(() => (btn.textContent = original), 2500);
+  const ok = await copyToClipboard(text);
+  btn.textContent = ok ? "✓ 已复制" : "复制失败";
+  setTimeout(() => (btn.textContent = original), 2000);
+}
+
+/**
+ * Saves the full transcript as a single note entry (visible in the Notes
+ * tab). Reuses the same storage path as the summary note.
+ */
+async function saveTranscriptAsNote() {
+  const btn = document.getElementById("saveTranscriptNoteBtn");
+  const original = btn.textContent;
+  const text =
+    currentTranscriptText ||
+    (currentTranscript || []).map((entry) => entry.text).join(" ") ||
+    "";
+  if (!text.trim()) {
+    btn.textContent = "暂无内容";
+    setTimeout(() => (btn.textContent = original), 1500);
+    return;
+  }
+  if (!currentVideoId) {
+    btn.textContent = "缺少视频信息";
+    setTimeout(() => (btn.textContent = original), 1500);
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = "保存中…";
+  try {
+    const result = await chrome.runtime.sendMessage({
+      action: "saveSummaryNote",
+      videoId: currentVideoId,
+      videoTitle: currentVideoTitle || "",
+      channelName: currentChannelName || "",
+      summaryText: text,
+    });
+    if (result?.success) {
+      btn.textContent = "✓ 已保存至笔记";
+      setTimeout(() => {
+        btn.textContent = original;
+        btn.disabled = false;
+      }, 2000);
+    } else {
+      btn.textContent = "保存失败";
+      setTimeout(() => {
+        btn.textContent = original;
+        btn.disabled = false;
+      }, 2500);
+      console.error("[dk-bilidown] Save transcript note failed:", result?.error);
+    }
+  } catch (error) {
+    btn.textContent = "保存失败";
+    setTimeout(() => {
+      btn.textContent = original;
+      btn.disabled = false;
+    }, 2500);
+    console.error("[dk-bilidown] Save transcript note error:", error);
+  }
 }
 
 function exportTranscript() {
@@ -1017,7 +1075,7 @@ function exportTranscript() {
 }
 
 // ============================================================
-// SUMMARY TAB: EXPORT / FEISHU / SAVE-AS-NOTE
+// SUMMARY TAB: EXPORT / SAVE-AS-NOTE
 // ============================================================
 
 /**

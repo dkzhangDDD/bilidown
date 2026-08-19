@@ -118,12 +118,13 @@
                 </div>
               </div>
               <div class="transcript-actions">
-                <button class="enhance-btn feishu-copy-btn" id="copyFeishuBtn">复制到飞书</button>
+                <button class="enhance-btn" id="copyTranscriptBtn" type="button" title="复制完整字幕">复制</button>
+                <button class="enhance-btn" id="saveTranscriptNoteBtn" type="button" title="将完整字幕保存为一条笔记，可在笔记页查看">保存字幕至笔记</button>
                 <select class="export-format" id="exportFormat" aria-label="导出格式">
                   <option value="md">Markdown</option>
                   <option value="html">HTML 网页</option>
                 </select>
-                <button class="enhance-btn" id="exportTranscriptBtn">导出</button>
+                <button class="enhance-btn" id="exportTranscriptBtn" type="button">导出</button>
               </div>
             </div>
             <div id="transcriptList"></div>
@@ -190,7 +191,7 @@
                 type="button"
                 title="将整篇总结保存为一条笔记，可在笔记页查看"
               >
-                保存整篇至笔记
+                保存总结至笔记
               </button>
               <select
                 class="export-format"

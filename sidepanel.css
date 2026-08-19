@@ -491,11 +491,6 @@ body {
   outline: 3px solid var(--accent-dim);
 }
 
-.feishu-copy-btn {
-  border-color: rgba(0, 174, 236, 0.3);
-  color: #00aeec;
-}
-
 @media (max-width: 430px) {
   .transcript-actions {
     flex-wrap: wrap;
