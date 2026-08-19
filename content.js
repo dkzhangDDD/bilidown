@@ -1,0 +1,972 @@
+/**
+ * CONTENT SCRIPT
+ *
+ * This script runs ON the Bilibili page itself. It can see and modify
+ * the Bilibili page DOM (the HTML elements).
+ *
+ * It handles:
+ * 1. Extracting video info (title, channel name) from the page
+ * 2. Injecting "key moment" markers onto Bilibili's progress bar
+ * 3. Adding a "bilidown" button to Bilibili's action bar (next to Share/Save)
+ *
+ * Think of it like a robot sitting inside the Bilibili tab,
+ * reading the page and making small visual changes.
+ */
+
+const DEBUG = false;
+const debugLog = (...args) => {
+  if (DEBUG) console.log(...args);
+};
+
+// ============================================================
+// GLOBAL STATE
+// ============================================================
+
+let ytdNoteButton = null;
+let ytdNoteButtonTimer = null;
+let ytdNoteKeyboardListenerAdded = false;
+let ytdNoteButtonRetryTimer = null;
+let ytdNoteFullscreenListenerAdded = false;
+let ytdNotePlayerContainer = null;
+let ytdBilidownButton = null;
+let bilidownButtonObserver = null;
+let bilidownButtonReconcileTimer = null;
+let bilidownButtonResizeListenerAdded = false;
+const BILIDOWN_BUTTON_POSITION_KEY = "bilidownButtonPosition";
+
+// ============================================================
+// INITIALIZATION
+// ============================================================
+
+/**
+ * When the page loads, inject our bilidown button and Note button.
+ * We wait a bit for Bilibili's UI to fully render.
+ */
+function init() {
+  // Register the global "n" keyboard shortcut once
+  if (!ytdNoteKeyboardListenerAdded) {
+    document.addEventListener("keydown", handleNoteKeyboardShortcut);
+    ytdNoteKeyboardListenerAdded = true;
+  }
+
+  if (!ytdNoteFullscreenListenerAdded) {
+    document.addEventListener("fullscreenchange", handleNoteFullscreenChange);
+    document.addEventListener("webkitfullscreenchange", handleNoteFullscreenChange);
+    ytdNoteFullscreenListenerAdded = true;
+  }
+
+  // Try to inject the buttons immediately
+  injectBilidownButton();
+  tryInjectNoteButton();
+
+  // Also set up an observer to handle Bilibili's dynamic content loading
+  // (Bilibili is an SPA, so elements appear/disappear as you navigate)
+  setupButtonObserver();
+  setupBilidownButtonResizeListener();
+}
+
+/**
+ * Attempts to inject the note button. If the player container isn't ready yet,
+ * retry a few times with a short delay. Bilibili renders the player asynchronously
+ * after navigation, so a single immediate attempt can miss it.
+ */
+function tryInjectNoteButton() {
+  if (!window.location.pathname.includes("/video/")) return;
+
+  // Clear any existing retry so we don't stack timers
+  if (ytdNoteButtonRetryTimer) {
+    clearInterval(ytdNoteButtonRetryTimer);
+    ytdNoteButtonRetryTimer = null;
+  }
+
+  let attempts = 0;
+  const maxAttempts = 30; // ~3 seconds of retrying
+
+  function attempt() {
+    attempts++;
+    const playerContainer = document.querySelector(
+      ".bpx-player-container, .bilibili-player, #bilibili-player",
+    );
+
+    if (playerContainer) {
+      injectNoteButton();
+      if (ytdNoteButtonRetryTimer) {
+        clearInterval(ytdNoteButtonRetryTimer);
+        ytdNoteButtonRetryTimer = null;
+      }
+      return;
+    }
+
+    if (attempts >= maxAttempts) {
+      debugLog(
+        "[dk-bilidown Content] Player container not found after retries, giving up",
+      );
+      if (ytdNoteButtonRetryTimer) {
+        clearInterval(ytdNoteButtonRetryTimer);
+        ytdNoteButtonRetryTimer = null;
+      }
+    }
+  }
+
+  attempt();
+  if (!ytdNoteButton || !ytdNoteButton.isConnected) {
+    ytdNoteButtonRetryTimer = setInterval(attempt, 100);
+  }
+}
+
+// Run init when DOM is ready
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", init);
+} else {
+  init();
+}
+
+// ============================================================
+// MESSAGE HANDLING
+// ============================================================
+
+/**
+ * Listen for messages from the side panel or background script.
+ * When they ask for video info, we read it from the page.
+ * When they send key moments, we highlight them on the progress bar.
+ */
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  debugLog("[dk-bilidown Content] Received message:", message.action, message);
+
+  if (message.action === "getVideoInfo") {
+    // Read video title and channel name from the page
+    const info = extractVideoInfo();
+    debugLog("[dk-bilidown Content] Returning video info:", info);
+    sendResponse(info);
+    return false; // Synchronous response
+  }
+
+  if (message.action === "highlightMoments") {
+    // Key moment markers disabled — chapters are shown in the side panel only.
+    sendResponse({ success: true });
+    return false;
+  }
+
+  if (message.action === "getCurrentTime") {
+    // Return the current video playback time (used by auto-scroll)
+    const video = document.querySelector("video");
+    sendResponse({
+      currentTime: video ? Math.floor(video.currentTime) : 0,
+      paused: video ? video.paused : true,
+    });
+    return false;
+  }
+
+  if (message.action === "seekTo") {
+    // Jump the video to a specific timestamp
+    debugLog("[dk-bilidown Content] Seeking to:", message.seconds);
+    seekToTimestamp(message.seconds);
+    sendResponse({ success: true });
+    return false;
+  }
+
+  if (message.action === "showNoteSavedFeedback") {
+    // Show brief feedback that note was saved
+    showNoteSavedToast(message.note);
+    sendResponse({ success: true });
+    return false;
+  }
+
+  // Unknown action - still send a response to prevent hanging
+  debugLog("[dk-bilidown Content] Unknown action:", message.action);
+  sendResponse({ success: false, error: "Unknown action" });
+  return false;
+});
+
+// ============================================================
+// BILIDOWN BUTTON INJECTION
+// ============================================================
+
+/**
+ * Injects a "bilidown" button into Bilibili's action bar.
+ * The button appears next to Share, Save, etc. below the video.
+ *
+ * When clicked, it opens the dk-bilidown side panel.
+ */
+function isVisibleBilidownHost(element) {
+  if (!element || !element.isConnected) return false;
+
+  const rect = element.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return false;
+
+  const style = window.getComputedStyle(element);
+  return style.display !== "none" && style.visibility !== "hidden";
+}
+
+/**
+ * Bilibili keeps hidden copies of its responsive action toolbar in the DOM.
+ * querySelector() can return one of those 0x0 copies before the toolbar the
+ * viewer can actually see, so inspect every candidate and resolve the native
+ * button group inside the visible action row for the current video.
+ */
+function findBilidownButtonHost() {
+  const candidates = Array.from(
+    document.querySelectorAll(
+      ".video-toolbar-left, .video-toolbar-container .video-toolbar-left, .toolbar-left",
+    ),
+  );
+  // Never fall back to document.body. Before Bilibili finishes rendering the
+  // toolbar, a normal-flow button appended to body shifts the entire watch
+  // page downward and leaves a large blank area above the video. The existing
+  // MutationObserver will retry as soon as the real toolbar becomes visible.
+  return candidates.find(isVisibleBilidownHost) || null;
+}
+
+function findShareButton(host) {
+  const matched =
+    host?.querySelector(
+      ".video-share-wrap, .video-share, [class*='share-wrap'], [title*='分享']",
+    ) || null;
+  if (!matched) return null;
+
+  // Bilibili's share icon contains several nested nodes. Dock beside the
+  // complete toolbar item, never inside its icon/text implementation.
+  let toolbarItem = matched;
+  while (toolbarItem.parentElement && toolbarItem.parentElement !== host) {
+    toolbarItem = toolbarItem.parentElement;
+  }
+  return toolbarItem.parentElement === host ? toolbarItem : matched;
+}
+
+function createBilidownButton() {
+  const bilidownButton = document.createElement("button");
+  bilidownButton.id = "ytd-bilidown-button";
+  bilidownButton.type = "button";
+  bilidownButton.setAttribute("aria-label", "打开 bilidown");
+  bilidownButton.innerHTML = `
+    <span class="ytd-bilidown-icon" style="font-size: 11px;">▶</span>
+    <span class="ytd-bilidown-label">AI 总结</span>
+  `;
+
+  // Style the button — rounded pill in our terracotta accent, sized to sit
+  // comfortably among Bilibili's native action buttons.
+  bilidownButton.style.cssText = `
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 0 18px;
+    height: 36px;
+    border: none;
+    border-radius: 18px;
+    background: #fb7299;
+    color: white;
+    font-family: "Roboto", "Arial", sans-serif;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    position: absolute;
+    z-index: 9998;
+    transition: background 0.2s, transform 0.1s, box-shadow 0.2s;
+    box-shadow: 0 4px 14px rgba(251, 114, 153, 0.3);
+    flex: 0 0 auto;
+    align-self: center;
+    width: max-content;
+    min-width: max-content;
+    max-width: max-content;
+    white-space: nowrap;
+  `;
+
+  // Hover effects
+  bilidownButton.addEventListener("mouseenter", () => {
+    bilidownButton.style.background = "#ff5f8f";
+    bilidownButton.style.transform = "scale(1.02)";
+  });
+
+  bilidownButton.addEventListener("mouseleave", () => {
+    bilidownButton.style.background = "#fb7299";
+    bilidownButton.style.transform = "scale(1)";
+  });
+
+  // Click handler — open the side panel
+  bilidownButton.addEventListener("click", async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    debugLog("[dk-bilidown] bilidown button clicked");
+
+    // Send message to background script to open side panel
+    try {
+      const result = await chrome.runtime.sendMessage({
+        action: "openSidePanel",
+      });
+      debugLog("[dk-bilidown] openSidePanel response:", result);
+    } catch (err) {
+      console.error("[dk-bilidown] Failed to open side panel:", err);
+    }
+  });
+
+  ytdBilidownButton = bilidownButton;
+  return bilidownButton;
+}
+
+function positionBilidownButton(bilidownButton, shareButton) {
+  if (!bilidownButton || !shareButton) return;
+  const shareRect = shareButton.getBoundingClientRect();
+  if (shareRect.width <= 0 || shareRect.height <= 0) return;
+
+  bilidownButton.style.left = `${Math.round(window.scrollX + shareRect.right + 12)}px`;
+  bilidownButton.style.top = `${Math.round(
+    window.scrollY + shareRect.top + (shareRect.height - bilidownButton.offsetHeight) / 2,
+  )}px`;
+  bilidownButton.style.right = "auto";
+}
+
+/**
+ * Reconciles the bilidown button with Bilibili's currently visible action row.
+ * This is intentionally idempotent because Bilibili rebuilds its watch page
+ * during navigation and at responsive breakpoints.
+ */
+function injectBilidownButton() {
+  const existingButtons = Array.from(
+    document.querySelectorAll("#ytd-bilidown-button"),
+  );
+
+  if (!window.location.pathname.includes("/video/")) {
+    existingButtons.forEach((button) => button.remove());
+    ytdBilidownButton = null;
+    return false;
+  }
+
+  const actionsContainer = findBilidownButtonHost();
+  if (!actionsContainer) {
+    debugLog("[dk-bilidown Content] Visible actions container not found yet");
+    return false;
+  }
+
+  let bilidownButton = existingButtons.find(
+    (button) => button === ytdBilidownButton,
+  );
+
+  if (!bilidownButton) {
+    existingButtons.forEach((button) => button.remove());
+    existingButtons.length = 0;
+    bilidownButton = createBilidownButton();
+  }
+
+  existingButtons.forEach((button) => {
+    if (button !== bilidownButton) button.remove();
+  });
+
+  // v1.1.7 allowed free dragging. Remove its saved viewport coordinate once.
+  // Keep the button outside Bilibili's Vue-owned toolbar: inserting foreign
+  // children there can corrupt its virtual DOM during responsive re-renders.
+  localStorage.removeItem(BILIDOWN_BUTTON_POSITION_KEY);
+
+  const shareButton = findShareButton(actionsContainer);
+  if (!shareButton) return false;
+  if (bilidownButton.parentElement !== document.body) {
+    document.body.appendChild(bilidownButton);
+  }
+  positionBilidownButton(bilidownButton, shareButton);
+
+  debugLog("[dk-bilidown Content] bilidown button reconciled");
+  return true;
+}
+
+function scheduleBilidownButtonReconciliation(delay = 80) {
+  if (bilidownButtonReconcileTimer) {
+    clearTimeout(bilidownButtonReconcileTimer);
+  }
+
+  bilidownButtonReconcileTimer = setTimeout(() => {
+    bilidownButtonReconcileTimer = null;
+    injectBilidownButton();
+  }, delay);
+}
+
+function setupBilidownButtonResizeListener() {
+  if (bilidownButtonResizeListenerAdded) return;
+
+  window.addEventListener("resize", () => {
+    scheduleBilidownButtonReconciliation(120);
+    if (ytdNoteButton && ytdNotePlayerContainer) {
+      positionNoteButton(
+        ytdNoteButton,
+        ytdNotePlayerContainer,
+        document.fullscreenElement || document.webkitFullscreenElement || null,
+      );
+    }
+  });
+  bilidownButtonResizeListenerAdded = true;
+}
+
+/**
+ * Sets up a MutationObserver to watch for Bilibili's dynamic content changes.
+ * When the action buttons container appears (after navigation), we inject our button.
+ */
+function setupButtonObserver() {
+  if (bilidownButtonObserver) return;
+
+  bilidownButtonObserver = new MutationObserver(() => {
+    // Check if we need to inject the buttons
+    if (window.location.pathname.includes("/video/")) {
+      scheduleBilidownButtonReconciliation();
+      if (!ytdNoteButton || !ytdNoteButton.isConnected) {
+        tryInjectNoteButton();
+      }
+    }
+  });
+
+  // Watch the entire body for changes (Bilibili rebuilds large chunks of the DOM)
+  bilidownButtonObserver.observe(document.body, {
+    childList: true,
+    subtree: true,
+  });
+}
+
+// ============================================================
+// NOTE BUTTON (Overlay on Video Player)
+// ============================================================
+
+/**
+ * Injects a "Note" button overlay on top of the Bilibili video player.
+ * The button appears when the mouse enters or moves over the player and hides
+ * after the cursor stays still for more than 2 seconds or leaves the player.
+ */
+function injectNoteButton() {
+  // Don't inject if we're not on a video page
+  if (!window.location.pathname.includes("/video/")) return;
+
+  // Always use the live Bilibili player containing the active video. In native
+  // fullscreen this element is inside document.fullscreenElement, so overlays
+  // appended here remain visible above the video.
+  const fullscreenRoot = document.fullscreenElement || document.webkitFullscreenElement;
+  const scope = fullscreenRoot || document;
+  const playerCandidates = Array.from(
+    scope.querySelectorAll?.(
+      ".bpx-player-container, .bilibili-player, #bilibili-player",
+    ) || [],
+  );
+  if (scope.matches?.(".bpx-player-container, .bilibili-player, #bilibili-player")) {
+    playerCandidates.unshift(scope);
+  }
+  const playerContainer =
+    playerCandidates.find((candidate) => candidate.querySelector("video")) || null;
+
+  if (!playerContainer) {
+    debugLog(
+      "[dk-bilidown Content] Player container not found yet, will retry",
+    );
+    return;
+  }
+
+  const fullscreenElement =
+    document.fullscreenElement || document.webkitFullscreenElement || null;
+  const noteHost = fullscreenElement || document.body;
+
+  // Keep the existing live button when possible, but move it between the
+  // body-owned overlay layer and native fullscreen root when required.
+  const existingButton = document.getElementById("ytd-note-button");
+  if (existingButton && ytdNoteButton === existingButton && existingButton.isConnected) {
+    if (existingButton.parentElement !== noteHost) {
+      noteHost.appendChild(existingButton);
+    }
+    ytdNotePlayerContainer = playerContainer;
+    positionNoteButton(existingButton, playerContainer, fullscreenElement);
+    return;
+  }
+  if (existingButton) existingButton.remove();
+
+  debugLog("[dk-bilidown Content] Injecting note button");
+
+  // Create the note button — a soft rounded pill that floats over the player
+  const noteButton = document.createElement("button");
+  noteButton.id = "ytd-note-button";
+  noteButton.innerHTML = `
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="margin-right: 7px;">
+      <path d="M12 20h9"></path>
+      <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
+    </svg>
+    <span>记笔记</span>
+  `;
+
+  // Soft rounded pill in the terracotta accent, with a gentle shadow.
+  // Start hidden; visibility is controlled by mouse activity.
+  noteButton.style.cssText = `
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    padding: 9px 16px;
+    background: #fb7299;
+    color: white;
+    border: none;
+    border-radius: 999px;
+    font-family: system-ui, -apple-system, "Roboto", sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.2px;
+    cursor: pointer;
+    transition: opacity 0.18s ease, transform 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
+    opacity: 0;
+    pointer-events: none;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.3);
+  `;
+
+  ytdNoteButton = noteButton;
+  ytdNotePlayerContainer = playerContainer;
+
+  // Show button when mouse enters or moves over the player.
+  // Hide after 2 seconds of idle or when the mouse leaves.
+  playerContainer.addEventListener("mouseenter", () => {
+    showNoteButton();
+    resetNoteButtonTimer();
+  });
+
+  playerContainer.addEventListener("mousemove", () => {
+    showNoteButton();
+    resetNoteButtonTimer();
+  });
+
+  playerContainer.addEventListener("mouseleave", () => {
+    clearTimeout(ytdNoteButtonTimer);
+    ytdNoteButtonTimer = null;
+    hideNoteButton();
+  });
+
+  // Hover effect — lift slightly
+  noteButton.addEventListener("mouseenter", () => {
+    noteButton.style.background = "#ff5f8f";
+    noteButton.style.boxShadow = "0 6px 18px rgba(0,0,0,0.35)";
+    noteButton.style.transform = "translateY(-1px)";
+  });
+
+  noteButton.addEventListener("mouseleave", () => {
+    noteButton.style.background = "#fb7299";
+    noteButton.style.boxShadow = "0 4px 14px rgba(0,0,0,0.3)";
+    noteButton.style.transform = "translateY(0)";
+  });
+
+  // Click handler — save the current moment as a note
+  noteButton.addEventListener("click", async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    await saveCurrentNote();
+  });
+
+  noteHost.appendChild(noteButton);
+  positionNoteButton(noteButton, playerContainer, fullscreenElement);
+
+  debugLog("[dk-bilidown Content] Note button injected");
+}
+
+function positionNoteButton(noteButton, playerContainer, fullscreenElement) {
+  if (!noteButton || !playerContainer) return;
+
+  if (fullscreenElement) {
+    noteButton.style.top = "16px";
+    noteButton.style.right = "16px";
+    noteButton.style.left = "auto";
+    return;
+  }
+
+  const rect = playerContainer.getBoundingClientRect();
+  noteButton.style.top = `${Math.round(window.scrollY + rect.top + 16)}px`;
+  noteButton.style.left = `${Math.round(
+    window.scrollX + rect.right - noteButton.offsetWidth - 16,
+  )}px`;
+  noteButton.style.right = "auto";
+}
+
+function handleNoteFullscreenChange() {
+  // Bilibili may replace or reparent the player when entering/exiting native
+  // fullscreen. Re-resolve the active container after that DOM update settles.
+  setTimeout(() => {
+    if (ytdNoteButton && !ytdNoteButton.isConnected) ytdNoteButton = null;
+    injectNoteButton();
+    showNoteButton();
+    resetNoteButtonTimer();
+  }, 120);
+}
+
+function showNoteButton() {
+  if (!ytdNoteButton) return;
+  ytdNoteButton.style.opacity = "1";
+  ytdNoteButton.style.pointerEvents = "auto";
+}
+
+function hideNoteButton() {
+  if (!ytdNoteButton) return;
+  ytdNoteButton.style.opacity = "0";
+  ytdNoteButton.style.pointerEvents = "none";
+}
+
+function resetNoteButtonTimer() {
+  clearTimeout(ytdNoteButtonTimer);
+  ytdNoteButtonTimer = setTimeout(() => {
+    hideNoteButton();
+  }, 2000);
+}
+
+/**
+ * Handles the "n" keyboard shortcut for saving a note.
+ * Only triggers on Bilibili watch pages and when the user is not typing
+ * in an input field.
+ */
+function handleNoteKeyboardShortcut(e) {
+  if (!window.location.pathname.includes("/video/")) return;
+  if (e.key !== "n" && e.key !== "N") return;
+
+  // Ignore if the user is typing in an input/textarea/contenteditable
+  const active = document.activeElement;
+  if (
+    active &&
+    (active.tagName === "INPUT" ||
+      active.tagName === "TEXTAREA" ||
+      active.isContentEditable)
+  ) {
+    return;
+  }
+
+  // Prevent Bilibili's own "n" shortcut (e.g. next video in playlist)
+  e.preventDefault();
+  e.stopPropagation();
+
+  // Show brief visual feedback on the button, then save
+  showNoteButton();
+  resetNoteButtonTimer();
+  saveCurrentNote();
+}
+
+/**
+ * Captures the current timestamp and saves it as a note.
+ */
+async function saveCurrentNote() {
+  debugLog("[dk-bilidown] Saving note");
+
+  const video = document.querySelector("video");
+  if (!video) {
+    console.error("[dk-bilidown] No video element found");
+    return;
+  }
+
+  // Go back 3 seconds to capture what was just said (user reacts after hearing it)
+  const currentTime = Math.max(0, Math.floor(video.currentTime) - 3);
+  const videoInfo = extractVideoInfo();
+  const bvidMatch = window.location.pathname.match(/\/video\/(BV[A-Za-z0-9]{10})/i);
+  const videoId = bvidMatch
+    ? `${bvidMatch[1]}@p${getActiveBilibiliPart()}`
+    : null;
+  if (!videoId) {
+    console.error("[dk-bilidown] Could not identify the current BV video");
+    return;
+  }
+
+  const noteButton = ytdNoteButton;
+  const originalContent = noteButton ? noteButton.innerHTML : "";
+
+  if (noteButton) {
+    noteButton.innerHTML =
+      '<span style="letter-spacing: 0.2px;">SAVING...</span>';
+    noteButton.style.pointerEvents = "none";
+  }
+
+  try {
+    const result = await chrome.runtime.sendMessage({
+      action: "saveNote",
+      videoId: videoId,
+      timestamp: currentTime,
+      videoTitle: videoInfo.title,
+      channelName: videoInfo.channelName,
+    });
+
+    if (result.success) {
+      if (noteButton) {
+        noteButton.innerHTML =
+          '<span style="letter-spacing: 0.2px;">SAVED</span>';
+        noteButton.style.background = "#7c8b6f";
+      }
+      showNoteSavedToast(result.note);
+    } else {
+      if (noteButton) {
+        noteButton.innerHTML =
+          '<span style="letter-spacing: 0.2px;">ERROR</span>';
+      }
+      console.error("[dk-bilidown] Save note error:", result.error);
+    }
+  } catch (err) {
+    if (noteButton) {
+      noteButton.innerHTML =
+        '<span style="letter-spacing: 0.2px;">ERROR</span>';
+    }
+    console.error("[dk-bilidown] Save note exception:", err);
+  }
+
+  setTimeout(() => {
+    if (noteButton) {
+      noteButton.innerHTML = originalContent;
+      noteButton.style.background = "#fb7299";
+      noteButton.style.pointerEvents = "auto";
+    }
+  }, 2000);
+}
+
+/**
+ * Shows a toast notification when a note is saved.
+ */
+function showNoteSavedToast(note) {
+  // Remove existing toast
+  const existing = document.getElementById("ytd-note-toast");
+  if (existing) existing.remove();
+
+  const toast = document.createElement("div");
+  toast.id = "ytd-note-toast";
+  toast.innerHTML = `
+    <div style="font-weight: 700; margin-bottom: 6px; color: #fb7299;">📝 笔记已保存</div>
+    <div style="font-size: 12px; color: #6b6258; margin-bottom: 8px;">${escapeHtmlForContent(note.timestamp)} — ${escapeHtmlForContent(note.videoTitle)}</div>
+    <div style="font-size: 13px; line-height: 1.55; color: #2e2a24;">"${escapeHtmlForContent(note.text)}"</div>
+    <div style="margin-top: 10px; font-size: 11px;">
+      <a href="${escapeHtmlForContent(note.timestampedUrl)}" style="color: #fb7299; font-weight: 600; text-decoration: none;">🔗 复制链接</a>
+    </div>
+  `;
+
+  toast.style.cssText = `
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    z-index: 999999;
+    background: #ffffff;
+    border: 1px solid #e3e5e7;
+    border-radius: 14px;
+    padding: 16px 20px;
+    max-width: 350px;
+    box-shadow: 0 12px 32px rgba(24, 25, 28, 0.16);
+    font-family: system-ui, -apple-system, "Roboto", sans-serif;
+    animation: ytdSlideIn 0.3s ease;
+  `;
+
+  // Add animation keyframes
+  const style = document.createElement("style");
+  style.textContent = `
+    @keyframes ytdSlideIn {
+      from { transform: translateX(100%); opacity: 0; }
+      to { transform: translateX(0); opacity: 1; }
+    }
+  `;
+  document.head.appendChild(style);
+
+  // Copy link handler
+  toast.querySelector("a").addEventListener("click", async (e) => {
+    e.preventDefault();
+    try {
+      await navigator.clipboard.writeText(note.timestampedUrl);
+      e.target.textContent = "✓ Copied!";
+    } catch (err) {
+      console.error("Copy failed:", err);
+    }
+  });
+
+  document.body.appendChild(toast);
+
+  // Auto-dismiss after 5 seconds
+  setTimeout(() => {
+    toast.style.animation = "ytdSlideIn 0.3s ease reverse";
+    setTimeout(() => toast.remove(), 300);
+  }, 5000);
+}
+
+// ============================================================
+// VIDEO INFO EXTRACTION
+// ============================================================
+
+/**
+ * Reads the video title, channel name, and description directly from Bilibili's page.
+ * These are just sitting in the HTML — we grab them from the DOM elements.
+ */
+function extractVideoInfo() {
+  // The video title is in an h1 element inside the #title container
+  const activePartTitle = document.querySelector(
+    ".video-pod__item.active .title, .video-pod__item.active .video-pod__title, .video-episode-card__info-playing .video-episode-card__info-title",
+  );
+  const titleElement =
+    activePartTitle || document.querySelector("h1.video-title, h1[title], .video-title");
+
+  // The channel name is in the channel info section
+  const channelElement = document.querySelector(".up-name, .up-name-container a, .username");
+
+  // Video duration from the video element
+  const videoElement = document.querySelector("video");
+
+  // Video description — Bilibili has this in a few possible places
+  const descriptionElement = document.querySelector(".desc-info-text, .video-desc-container, .desc-info");
+
+  return {
+    title: titleElement?.textContent?.trim() || "",
+    channelName: channelElement?.textContent?.trim() || "",
+    duration: videoElement?.duration || 0,
+    description: descriptionElement?.textContent?.trim() || "",
+  };
+}
+
+// ============================================================
+// PROGRESS BAR KEY MOMENTS
+// ============================================================
+
+/**
+ * Adds colored marker dots to Bilibili's video progress bar
+ * at the positions of key moments identified by the AI provider.
+ *
+ * How it works:
+ * - Bilibili's progress bar is a <div> element with a known class
+ * - We calculate each moment's position as a percentage of total duration
+ * - We inject small colored <div> elements at those positions
+ * - The markers are absolutely positioned on top of the progress bar
+ *
+ * This is a "bonus feature" — it gives you a visual preview
+ * of where the good stuff is in the video.
+ */
+function highlightKeyMoments(moments, videoDuration) {
+  // Disabled: no timeline markers. Chapters live only in the side panel.
+  return;
+}
+
+// ============================================================
+// SEEK TO TIMESTAMP
+// ============================================================
+
+/**
+ * Jumps the Bilibili video to a specific timestamp (in seconds).
+ * This is called when the user clicks a timestamp in the side panel.
+ *
+ * We simply set the video element's .currentTime property,
+ * which is the standard HTML5 way to seek in a video.
+ */
+function seekToTimestamp(seconds) {
+  const video = document.querySelector("video");
+  if (!video) {
+    console.error("[dk-bilidown Content] No video element found for seek");
+    return;
+  }
+
+  debugLog("[dk-bilidown Content] Seeking to:", seconds);
+  video.currentTime = seconds;
+  // Also play the video if it's paused
+  if (video.paused) {
+    video.play().catch(() => {}); // Ignore autoplay errors
+  }
+}
+
+function escapeHtmlForContent(text) {
+  const div = document.createElement("div");
+  div.textContent = text || "";
+  return div.innerHTML;
+}
+
+// ============================================================
+// PAGE NAVIGATION DETECTION
+// ============================================================
+
+/**
+ * Bilibili is a "Single Page Application" (SPA). This means when you
+ * click on a new video, the page doesn't fully reload — Bilibili
+ * dynamically swaps out the content. So our content script stays alive
+ * but needs to detect when the video changes.
+ *
+ * We watch for URL changes using the `yt-navigate-finish` event,
+ * which Bilibili fires after navigation completes. When that happens,
+ * we clean up old markers and re-inject the button.
+ */
+function handleBilibiliNavigation() {
+  // Clean up old key moment markers when navigating to a new video
+  const existingMarkers = document.querySelectorAll(".ytd-key-moment-markers");
+  existingMarkers.forEach((m) => m.remove());
+
+  // Remove old buttons (they will be re-injected for the new video)
+  document
+    .querySelectorAll("#ytd-bilidown-button")
+    .forEach((button) => button.remove());
+  ytdBilidownButton = null;
+  if (bilidownButtonReconcileTimer) {
+    clearTimeout(bilidownButtonReconcileTimer);
+    bilidownButtonReconcileTimer = null;
+  }
+
+  const existingNoteButton = document.getElementById("ytd-note-button");
+  if (existingNoteButton) existingNoteButton.remove();
+
+  // Reset note button state
+  ytdNoteButton = null;
+  ytdNotePlayerContainer = null;
+  clearTimeout(ytdNoteButtonTimer);
+  ytdNoteButtonTimer = null;
+  if (ytdNoteButtonRetryTimer) {
+    clearInterval(ytdNoteButtonRetryTimer);
+    ytdNoteButtonRetryTimer = null;
+  }
+
+  // Remove any toasts
+  const existingToast = document.getElementById("ytd-note-toast");
+  if (existingToast) existingToast.remove();
+
+  // Re-inject buttons for the new video (with a small delay for Bilibili to render)
+  setTimeout(() => {
+    scheduleBilidownButtonReconciliation(0);
+    tryInjectNoteButton();
+  }, 500);
+}
+
+function getActiveBilibiliPart() {
+  const urlPart = Math.max(1, Number(new URL(window.location.href).searchParams.get("p")) || 1);
+  const items = Array.from(
+    document.querySelectorAll(".video-pod__item, .video-episode-card__info"),
+  );
+  const activeIndex = items.findIndex((item) =>
+    item.matches(".active, .video-episode-card__info-playing") ||
+    item.querySelector(".playing, .active"),
+  );
+  const activeItem = activeIndex >= 0 ? items[activeIndex] : null;
+  const activeHref =
+    activeItem?.matches?.("a[href]")
+      ? activeItem.getAttribute("href")
+      : activeItem?.querySelector?.("a[href]")?.getAttribute("href");
+  if (activeHref) {
+    try {
+      const hrefPart = Number(new URL(activeHref, window.location.href).searchParams.get("p"));
+      if (hrefPart > 0) return hrefPart;
+    } catch {}
+  }
+  return activeIndex >= 0 ? activeIndex + 1 : urlPart;
+}
+
+function getBilibiliNavigationUrl() {
+  // Collections can switch to another BV item before the address bar settles.
+  // Use the active card's real link when available instead of combining the
+  // previous BV with the new card index.
+  const activeItem = document.querySelector(
+    ".video-pod__item.active, .video-episode-card__info-playing",
+  );
+  const activeAnchor = activeItem?.matches?.("a[href]")
+    ? activeItem
+    : activeItem?.querySelector?.("a[href*='/video/BV']");
+  const activeHref = activeAnchor?.getAttribute?.("href");
+  let url = new URL(window.location.href);
+  if (activeHref) {
+    try {
+      const candidate = new URL(activeHref, window.location.href);
+      if (/\/video\/BV[A-Za-z0-9]{10}/i.test(candidate.pathname)) url = candidate;
+    } catch {}
+  }
+  const part = getActiveBilibiliPart();
+  if (part > 1) url.searchParams.set("p", String(part));
+  else url.searchParams.delete("p");
+  return url.toString();
+}
+
+let lastBilibiliUrl = getBilibiliNavigationUrl();
+setInterval(() => {
+  const nextUrl = getBilibiliNavigationUrl();
+  if (nextUrl !== lastBilibiliUrl) {
+    lastBilibiliUrl = nextUrl;
+    handleBilibiliNavigation();
+    chrome.runtime
+      .sendMessage({ action: "bilibiliNavigation", url: nextUrl })
+      .catch(() => {});
+  }
+}, 800);

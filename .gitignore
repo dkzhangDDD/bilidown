@@ -1,0 +1,26 @@
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Chrome extension dev artifacts
+.crx
+.pem
+*.pem
+_metadata/
+
+# Node (if any tooling added later)
+node_modules/
+package-lock.json
+
+# Backup / temp
+*.bak
+*.tmp
+*.log
