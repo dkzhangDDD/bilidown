@@ -81,9 +81,13 @@ async function requestAiCompletion({
   responseFormat,
 }) {
   const settings = await getSettings();
-  if (!settings.aiApiKey) {
+  const provider = YTD_SETTINGS.isKnownProvider(settings.provider)
+    ? settings.provider
+    : YTD_SETTINGS.DEFAULT_PROVIDER;
+  const apiKey = YTD_SETTINGS.resolveAiApiKey(settings);
+  if (!apiKey) {
     const error = new Error(
-      "DeepSeek API key not configured. Open bilidown Settings.",
+      "AI API key not configured. Open bilidown Settings.",
     );
     error.code = "NO_AI_KEY";
     throw error;
@@ -97,8 +101,12 @@ async function requestAiCompletion({
   if (responseFormat) {
     body.response_format = responseFormat;
   }
-  // Product features need bounded, predictable latency rather than reasoning traces.
-  body.thinking = { type: "disabled" };
+  // DeepSeek-specific field: product features need bounded, predictable
+  // latency rather than reasoning traces. Other providers ignore it or may
+  // reject it, so only send it for DeepSeek.
+  if (provider === "deepseek") {
+    body.thinking = { type: "disabled" };
+  }
 
   const controller = new AbortController();
   let timeoutKind = "";
@@ -124,12 +132,12 @@ async function requestAiCompletion({
   resetIdleTimeout();
   try {
     const response = await fetch(
-      YTD_SETTINGS.chatCompletionsUrl(),
+      YTD_SETTINGS.chatCompletionsUrl(settings.aiBaseUrl),
       {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${settings.aiApiKey}`,
+          Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify(body),
         signal: controller.signal,
@@ -415,7 +423,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .then((settings) =>
         sendResponse({
           hasSupadataKey: true,
-          hasAiKey: !!settings.aiApiKey,
+          hasAiKey: !!YTD_SETTINGS.resolveAiApiKey(settings),
         }),
       )
       .catch((error) => sendResponse({ error: error.message }));
@@ -967,11 +975,11 @@ async function handleAnalyzeTranscript(
 ) {
   try {
     const settings = await getSettings();
-    if (!settings.aiApiKey) {
+    if (!YTD_SETTINGS.resolveAiApiKey(settings)) {
       return {
         success: false,
         error: "NO_AI_KEY",
-        message: "DeepSeek API key not configured. Open bilidown Settings.",
+        message: "AI API key not configured. Open bilidown Settings.",
       };
     }
 
@@ -1086,11 +1094,11 @@ async function handleSummarizeTranscript(
 ) {
   try {
     const settings = await getSettings();
-    if (!settings.aiApiKey) {
+    if (!YTD_SETTINGS.resolveAiApiKey(settings)) {
       return {
         success: false,
         error: "NO_AI_KEY",
-        message: "DeepSeek API key not configured. Open bilidown Settings.",
+        message: "AI API key not configured. Open bilidown Settings.",
       };
     }
 
@@ -1469,7 +1477,7 @@ async function cleanupNoteText(
   videoTitle,
 ) {
   const settings = await getSettings();
-  if (!settings.aiApiKey) {
+  if (!YTD_SETTINGS.resolveAiApiKey(settings)) {
     return [beforeText, targetText, afterText].filter(Boolean).join(" ");
   }
 
@@ -1592,11 +1600,11 @@ async function handleExplainSelection(
 ) {
   try {
     const settings = await getSettings();
-    if (!settings.aiApiKey) {
+    if (!YTD_SETTINGS.resolveAiApiKey(settings)) {
       return {
         success: false,
         error: "NO_AI_KEY",
-        message: "DeepSeek API key not configured.",
+        message: "AI API key not configured.",
       };
     }
 
@@ -1763,8 +1771,8 @@ async function handleTranslateContent(
     }
 
     const settings = await getSettings();
-    if (!settings.aiApiKey) {
-      return { success: false, error: "DeepSeek API key not configured" };
+    if (!YTD_SETTINGS.resolveAiApiKey(settings)) {
+      return { success: false, error: "AI API key not configured" };
     }
 
     const sourceSegments = validateTranscriptBatchRequest(content);

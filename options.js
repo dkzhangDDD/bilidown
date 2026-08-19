@@ -16,14 +16,24 @@ const YTD_OPTIONS = (() => {
       supadataLink: "Create a Supadata account and key",
       supadataHelpSuffix:
         ". Supadata generates the key during onboarding.",
-      aiProvider: "AI provider",
-      providerSummaryLabel: "Supported AI provider",
-      providerBadge: "Supported in this version",
+      aiProvider: "AI model",
+      aiModelLabel: "AI model",
+      providerCustom: "Custom",
       deepseekApiKeyLabel: "DeepSeek API key",
       deepseekHelp:
         "bilidown uses DeepSeek V4 Flash for overviews, explanations, translation, and note polishing. ",
       deepseekLink: "Create a DeepSeek API key",
       deepseekHelpSuffix: ".",
+      minimaxApiKeyLabel: "MiniMax API key",
+      minimaxHelp:
+        'bilidown uses MiniMax M3 for overviews, summaries, translation, and note polishing. Token Plan subscribers can find their subscription key at <a href="https://platform.minimaxi.com" target="_blank" rel="noreferrer">MiniMax Open Platform</a> under Subscription Management &gt; Token Plan.',
+      minimaxPrivacyNote:
+        "When you use AI features, MiniMax receives the video transcript and relevant video context. Review MiniMax's terms and pricing before saving.",
+      customApiKeyLabel: "API key",
+      customBaseUrlLabel: "Base URL",
+      customModelLabel: "Model name",
+      customHelp:
+        "The provider must expose an OpenAI-compatible /chat/completions endpoint. A trailing /v1 in the Base URL is fine.",
       privacyNote:
         "When you use AI features, DeepSeek receives the video transcript and relevant video context. Review DeepSeek's terms and pricing before saving.",
       saveSettings: "Save settings",
@@ -55,10 +65,10 @@ const YTD_OPTIONS = (() => {
       footer:
         'Read <a href="PRIVACY.md" target="_blank">PRIVACY.md</a> in the repository for the complete data-flow description.',
       migrationWarning:
-        "Custom provider settings were removed safely. Your Supadata key was kept, but the AI key was cleared. Enter a DeepSeek API key to continue.",
+        "Custom provider settings were removed safely. Your Supadata key was kept, but the AI key was cleared. Enter an API key for your AI model to continue.",
       saving: "Saving…",
       addSupadataKey: "Add a Supadata API key.",
-      addDeepseekKey: "Add a DeepSeek API key.",
+      addDeepseekKey: "Add an API key for the selected AI model.",
       saved: "Settings saved and verified. bilidown will use them immediately.",
       saveFailed: "Could not save settings. Please try again.",
       copying: "Copying…",
@@ -86,14 +96,24 @@ const YTD_OPTIONS = (() => {
       supadataHelp: "用于获取带时间戳的 Bilibili 字幕。",
       supadataLink: "创建 Supadata 账号并获取密钥",
       supadataHelpSuffix: "。Supadata 会在引导流程中生成密钥。",
-      aiProvider: "AI 服务",
-      providerSummaryLabel: "支持的 AI 服务",
-      providerBadge: "当前版本支持",
+      aiProvider: "AI 模型",
+      aiModelLabel: "AI 模型",
+      providerCustom: "自定义",
       deepseekApiKeyLabel: "DeepSeek API 密钥",
       deepseekHelp:
         "bilidown 使用 DeepSeek V4 Flash 生成概览、解释内容、翻译字幕和润色笔记。",
       deepseekLink: "创建 DeepSeek API 密钥",
       deepseekHelpSuffix: "。",
+      minimaxApiKeyLabel: "MiniMax API 密钥",
+      minimaxHelp:
+        'bilidown 使用 MiniMax M3 生成概览、总结、翻译与润色。包月 Token Plan 用户请在<a href="https://platform.minimaxi.com" target="_blank" rel="noreferrer">MiniMax 开放平台</a>「订阅管理 &gt; Token Plan」查看订阅 Key。',
+      minimaxPrivacyNote:
+        "使用 AI 功能时，MiniMax 会收到视频字幕及相关视频上下文。保存前请查看 MiniMax 的服务条款和价格。",
+      customApiKeyLabel: "API 密钥",
+      customBaseUrlLabel: "Base URL",
+      customModelLabel: "模型名称",
+      customHelp:
+        "服务商需提供 OpenAI 兼容的 /chat/completions 接口。Base URL 以 /v1 结尾也没关系，会自动拼接。",
       privacyNote:
         "使用 AI 功能时，DeepSeek 会收到视频字幕及相关视频上下文。保存前请查看 DeepSeek 的服务条款和价格。",
       saveSettings: "保存设置",
@@ -124,10 +144,10 @@ const YTD_OPTIONS = (() => {
       footer:
         '完整数据流说明请参阅仓库中的 <a href="PRIVACY.md" target="_blank">PRIVACY.md</a>。',
       migrationWarning:
-        "已安全移除自定义服务设置。Supadata 密钥已保留，AI 密钥已清除。请输入 DeepSeek API 密钥以继续使用。",
+        "已安全移除自定义服务设置。Supadata 密钥已保留，AI 密钥已清除。请为 AI 模型重新输入密钥。",
       saving: "正在保存…",
       addSupadataKey: "请添加 Supadata API 密钥。",
-      addDeepseekKey: "请添加 DeepSeek API 密钥。",
+      addDeepseekKey: "请为当前选择的 AI 模型添加 API 密钥。",
       saved: "设置已保存并验证成功，bilidown 将立即使用新配置。",
       saveFailed: "无法保存设置，请重试。",
       copying: "正在复制…",
@@ -289,6 +309,8 @@ const YTD_OPTIONS = (() => {
     if (
       !verified ||
       verified.aiApiKey !== settings.aiApiKey ||
+      verified.minimaxApiKey !== settings.minimaxApiKey ||
+      verified.customApiKey !== settings.customApiKey ||
       verified.asrApiKey !== settings.asrApiKey
     ) {
       throw new Error("SETTINGS_WRITE_VERIFICATION_FAILED");
@@ -380,7 +402,15 @@ const YTD_OPTIONS = (() => {
       getSafeLocalStorage(root),
     );
     const form = doc.getElementById("settingsForm");
+    const providerSelect = doc.getElementById("aiProviderSelect");
     const aiApiKeyInput = doc.getElementById("aiApiKey");
+    const minimaxApiKeyInput = doc.getElementById("minimaxApiKey");
+    const customApiKeyInput = doc.getElementById("customApiKey");
+    const customBaseUrlInput = doc.getElementById("customBaseUrl");
+    const customModelInput = doc.getElementById("customModel");
+    const deepseekProviderGroup = doc.getElementById("deepseekProviderGroup");
+    const minimaxProviderGroup = doc.getElementById("minimaxProviderGroup");
+    const customProviderGroup = doc.getElementById("customProviderGroup");
     const asrApiKeyInput = doc.getElementById("asrApiKey");
     const customizationPrompt = doc.getElementById("customizationPrompt");
     const copyCustomizationPromptBtn = doc.getElementById(
@@ -399,6 +429,19 @@ const YTD_OPTIONS = (() => {
       element.textContent = state
         ? translate(currentLanguage, state.key, state.params)
         : "";
+    }
+
+    function applyProviderSelection(provider) {
+      const normalized = settingsApi.isKnownProvider(provider)
+        ? provider
+        : settingsApi.DEFAULT_PROVIDER;
+      providerSelect.value = normalized;
+      deepseekProviderGroup.style.display =
+        normalized === "deepseek" ? "" : "none";
+      minimaxProviderGroup.style.display =
+        normalized === "minimax" ? "" : "none";
+      customProviderGroup.style.display =
+        normalized === "custom" ? "" : "none";
     }
 
     function setStatus(element, key, params = {}) {
@@ -453,7 +496,12 @@ const YTD_OPTIONS = (() => {
         const settings = migration.settings;
 
         aiApiKeyInput.value = settings.aiApiKey;
+        minimaxApiKeyInput.value = settings.minimaxApiKey;
+        customApiKeyInput.value = settings.customApiKey;
+        customBaseUrlInput.value = settings.customBaseUrl;
+        customModelInput.value = settings.customModel;
         asrApiKeyInput.value = settings.asrApiKey;
+        applyProviderSelection(settings.provider);
         if (migration.migrated) {
           await storage.set({ [settingsApi.STORAGE_KEY]: settings });
           setStatus(saveStatus, "migrationWarning");
@@ -477,11 +525,19 @@ const YTD_OPTIONS = (() => {
       setStatus(saveStatus, "saving");
 
       const settings = settingsApi.normalize({
+        provider: providerSelect.value,
         aiApiKey: aiApiKeyInput.value,
+        minimaxApiKey: minimaxApiKeyInput.value,
+        customApiKey: customApiKeyInput.value,
+        customBaseUrl: customBaseUrlInput.value,
+        customModel: customModelInput.value,
         asrApiKey: asrApiKeyInput.value,
       });
 
-      if (!settings.aiApiKey && !settings.asrApiKey) {
+      if (
+        !settingsApi.resolveAiApiKey(settings) &&
+        !settings.asrApiKey
+      ) {
         setStatus(saveStatus, "addDeepseekKey");
         return;
       }
@@ -539,6 +595,9 @@ const YTD_OPTIONS = (() => {
     }
 
     form.addEventListener("submit", saveSettings);
+    providerSelect.addEventListener("change", () => {
+      applyProviderSelection(providerSelect.value);
+    });
     copyCustomizationPromptBtn.addEventListener(
       "click",
       copyCustomizationPrompt,

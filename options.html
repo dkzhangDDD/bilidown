@@ -65,46 +65,112 @@
         </section>
 
         <section class="card">
-          <h2 data-i18n="aiProvider">AI provider</h2>
-          <div
-            class="provider-summary"
-            aria-label="Supported AI provider"
-            data-i18n-aria-label="providerSummaryLabel"
-          >
-            <span class="provider-name">DeepSeek V4 Flash</span>
-            <span class="provider-badge" data-i18n="providerBadge"
-              >Supported in this version</span
+          <h2 data-i18n="aiProvider">AI 服务</h2>
+
+          <label for="aiProviderSelect" data-i18n="aiModelLabel">AI 模型</label>
+          <select id="aiProviderSelect" name="aiProviderSelect">
+            <option value="deepseek">DeepSeek V4 Flash</option>
+            <option value="minimax">MiniMax M3</option>
+            <option value="custom" data-i18n="providerCustom">自定义</option>
+          </select>
+
+          <div id="deepseekProviderGroup">
+            <label for="aiApiKey" data-i18n="deepseekApiKeyLabel"
+              >DeepSeek API key</label
             >
+            <input
+              id="aiApiKey"
+              name="aiApiKey"
+              type="password"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="Paste your DeepSeek key"
+            />
+            <p class="help">
+              <span data-i18n="deepseekHelp"
+                >bilidown uses DeepSeek V4 Flash for overviews,
+                explanations, translation, and note polishing.</span
+              >
+              <a
+                href="https://platform.deepseek.com/api_keys"
+                target="_blank"
+                rel="noreferrer"
+                data-i18n="deepseekLink"
+                >Create a DeepSeek API key</a
+              ><span data-i18n="deepseekHelpSuffix">.</span>
+            </p>
+            <div class="privacy-note" data-i18n="privacyNote">
+              When you use AI features, DeepSeek receives the video transcript
+              and relevant video context. Review DeepSeek's terms and pricing
+              before saving.
+            </div>
           </div>
 
-          <label for="aiApiKey" data-i18n="deepseekApiKeyLabel"
-            >DeepSeek API key</label
-          >
-          <input
-            id="aiApiKey"
-            name="aiApiKey"
-            type="password"
-            autocomplete="off"
-            spellcheck="false"
-            placeholder="Paste your DeepSeek key"
-          />
-          <p class="help">
-            <span data-i18n="deepseekHelp"
-              >bilidown uses DeepSeek V4 Flash for overviews,
-              explanations, translation, and note polishing.</span
+          <div id="minimaxProviderGroup" style="display: none">
+            <label for="minimaxApiKey" data-i18n="minimaxApiKeyLabel"
+              >MiniMax API key</label
             >
-            <a
-              href="https://platform.deepseek.com/api_keys"
-              target="_blank"
-              rel="noreferrer"
-              data-i18n="deepseekLink"
-              >Create a DeepSeek API key</a
-            ><span data-i18n="deepseekHelpSuffix">.</span>
-          </p>
-          <div class="privacy-note" data-i18n="privacyNote">
-            When you use AI features, DeepSeek receives the video transcript
-            and relevant video context. Review DeepSeek's terms and pricing
-            before saving.
+            <input
+              id="minimaxApiKey"
+              name="minimaxApiKey"
+              type="password"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="Paste your MiniMax key"
+            />
+            <p class="help" data-i18n-html="minimaxHelp">
+              bilidown 使用 MiniMax M3 生成概览、总结、翻译与润色。包月 Token
+              Plan 请在<a
+                href="https://platform.minimaxi.com"
+                target="_blank"
+                rel="noreferrer"
+                >MiniMax 开放平台</a
+              >「订阅管理 > Token Plan」查看订阅 Key。
+            </p>
+            <div class="privacy-note" data-i18n-html="minimaxPrivacyNote">
+              使用 AI 功能时，MiniMax 会收到视频字幕及相关视频上下文。保存前请查看
+              MiniMax 的服务条款和价格。
+            </div>
+          </div>
+
+          <div id="customProviderGroup" style="display: none">
+            <label for="customApiKey" data-i18n="customApiKeyLabel"
+              >API key</label
+            >
+            <input
+              id="customApiKey"
+              name="customApiKey"
+              type="password"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="Paste your API key"
+            />
+            <label for="customBaseUrl" data-i18n="customBaseUrlLabel"
+              >Base URL</label
+            >
+            <input
+              id="customBaseUrl"
+              name="customBaseUrl"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="https://api.example.com/v1"
+            />
+            <label for="customModel" data-i18n="customModelLabel"
+              >Model name</label
+            >
+            <input
+              id="customModel"
+              name="customModel"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="model-name"
+            />
+            <p class="help" data-i18n="customHelp">
+              需要服务商提供 OpenAI 兼容的
+              /chat/completions 接口。Base URL 以 /v1 结尾时也会自动拼接。
+            </p>
           </div>
         </section>
 

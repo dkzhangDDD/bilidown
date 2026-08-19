@@ -1220,7 +1220,7 @@ function showError(title, message) {
 
 function showConfigError(configStatus) {
   const missingKeys = [];
-  if (!configStatus.hasAiKey) missingKeys.push("DeepSeek API 密钥");
+  if (!configStatus.hasAiKey) missingKeys.push("AI 模型 API 密钥");
 
   showState("error");
   document.getElementById("errorTitle").textContent = "还没有配置 API 密钥";

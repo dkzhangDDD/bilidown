@@ -121,12 +121,14 @@ label {
 }
 
 input,
+select,
 textarea,
 button {
   font: inherit;
 }
 
 input,
+select,
 textarea {
   width: 100%;
   padding: 11px 12px;
@@ -136,7 +138,13 @@ textarea {
   color: var(--text);
 }
 
+select {
+  margin-top: 4px;
+  cursor: pointer;
+}
+
 input:focus,
+select:focus,
 textarea:focus {
   border-color: var(--accent);
   outline: 3px solid rgba(251, 114, 153, 0.14);

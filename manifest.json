@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "bilidown",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAkRjpsaYgq+JJXQXn7TR8lIrMMyufcHZ7VW4r63mVPzvI5XS8dVhGMtdP5euDHLAjsoKwCVhdo9ImcNk6BQOm31iQjIyhPliW8uNSBje/W4R2fZoezNaJEAqmNHOWUSV6dxxSMN3Vh6AxYc/7LDZsk3SKzYCWhkwzvmgp9Qmm/tvYGGoMEXOqrvL5gwHlfRj8WC2YsRLTOekYBrA22Nol7huJik2Viwnao0Ms9p8ELbmHomgbLOdYKRTzLpsKFB1ATjDyv5dISYpoTqFWGDZOIr448F0/qyp2d9gmEwg7zrAt9hWtO2L7wLugU+GLJLMeohs/3dK3FwFAw4LeiHvKLwIDAQAB",
   "minimum_chrome_version": "116",
   "description": "bilidown（dk 二次开发版）：把 B 站视频变成带字幕、AI 总结、完整笔记、时间戳与笔记的学习资料。",
@@ -19,7 +19,8 @@
     "https://*.akamaized.net/*",
     "https://dashscope.aliyuncs.com/*",
     "https://*.oss-cn-beijing.aliyuncs.com/*",
-    "https://api.deepseek.com/*"
+    "https://api.deepseek.com/*",
+    "https://api.minimaxi.com/*"
   ],
   "action": {
     "default_title": "打开 bilidown",
