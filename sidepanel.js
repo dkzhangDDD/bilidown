@@ -15,7 +15,7 @@ const debugLog = (...args) => {
 // ============================================================
 
 let currentVideoId = null;
-const BILIDOWN_CACHE_SCHEMA_VERSION = 4;
+const BILIDOWN_CACHE_SCHEMA_VERSION = 8;
 let generation = 0;
 let currentVideoUrl = null;
 let currentAnalysis = null;
@@ -28,10 +28,11 @@ let currentVideoTitle = "";
 let currentChannelName = "";
 let currentVideoDescription = "";
 let currentVideoDuration = 0;
+let currentPlatform = null;
 let isAnalysisLoading = false; // Track if analysis is in progress
 let currentSummary = null; // Full-note summary (Markdown text) for this video
 let isSummaryLoading = false; // Track if summary is in progress
-let bilibiliTabId = null; // Store the Bilibili tab ID for reliable messaging
+let activeVideoTabId = null; // Store the active Bilibili/YouTube tab ID
 let errorAction = null;
 
 // --- Translation state ---
@@ -95,10 +96,10 @@ let lastAutoScrollTime = 0; // Timestamp of last programmatic scroll (ignores sc
 // ============================================================
 
 const TRANSCRIPT_SEGMENT_LIMITS = Object.freeze({
-  minChars: 60,
-  idealChars: 180,
-  maxChars: 320,
-  maxSeconds: 20,
+  minChars: 20,
+  idealChars: 72,
+  maxChars: 120,
+  maxSeconds: 8,
 });
 
 function normalizeCaptionText(text) {
@@ -167,9 +168,14 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
       const oversizedParts = splitOversizedThought(cleanPart, limits.maxChars);
       oversizedParts.forEach((part, partIndex) => {
         const ratio = text.length ? Math.min(1, consumedChars / text.length) : 0;
+        const partStart = start + duration * ratio;
+        const nextRatio = text.length
+          ? Math.min(1, (consumedChars + part.length) / text.length)
+          : ratio;
         pieces.push({
           text: part,
-          start: start + duration * ratio,
+          start: partStart,
+          end: start + duration * nextRatio,
           semanticEnd:
             /[.!?。！？]["')\]”’）】」』]*$/.test(part) ||
             oversizedParts.length > 1,
@@ -191,6 +197,7 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
     grouped.push({
       id: `segment-${index}-${Math.round(current.start * 1000)}`,
       start: current.start,
+      end: current.end,
       text,
       texts: [text],
     });
@@ -198,8 +205,12 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
   };
 
   pieces.forEach((piece) => {
-    if (!current) current = { start: piece.start, text: "" };
+    if (!current) {
+      current = { start: piece.start, end: piece.end, text: "" };
+    }
+    const gap = Math.max(0, piece.start - current.end);
     current.text = normalizeCaptionText(`${current.text} ${piece.text}`);
+    current.end = Math.max(current.end, piece.end);
     const elapsed = Math.max(0, piece.start - current.start);
     const comfortablySized = current.text.length >= limits.minChars;
     const reachedIdeal = current.text.length >= limits.idealChars;
@@ -209,6 +220,7 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
         (reachedIdeal ||
           current.text.length >= limits.maxChars ||
           elapsed >= limits.maxSeconds));
+    const pauseBoundary = gap >= 0.65 && elapsed >= 1.5;
     const reachedGuardrail =
       atNaturalBoundary &&
       (current.text.length >= limits.maxChars || elapsed >= limits.maxSeconds);
@@ -217,8 +229,11 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
       elapsed >= limits.maxSeconds + 5;
 
     if (
-      (atNaturalBoundary && (comfortablySized || elapsed >= 8)) ||
+      (atNaturalBoundary &&
+        (comfortablySized ||
+          elapsed >= Math.min(6, limits.maxSeconds))) ||
       (atNaturalBoundary && reachedIdeal) ||
+      pauseBoundary ||
       reachedGuardrail ||
       reachedHardGuardrail
     ) {
@@ -242,7 +257,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     action: "checkConfig",
   });
 
-  if (!configStatus.hasSupadataKey || !configStatus.hasAiKey) {
+  if (
+    !configStatus.hasAsrProvider &&
+    !configStatus.hasSupadataKey &&
+    !configStatus.hasAiKey
+  ) {
     showConfigError(configStatus);
     return;
   }
@@ -324,12 +343,13 @@ function panelIsShowingResults() {
  * refresh the digest when the video changed.
  */
 function handleFrontTabUrl(url) {
-  if (!/^https:\/\/www\.bilibili\.com\/video\//.test(url || "")) {
-    // Panel is a Bilibili-only tool — remove itself from non-Bilibili tabs.
+  if (!YTD_SETTINGS.isSupportedVideoUrl(url)) {
+    // Remove the panel from unsupported pages.
     window.close();
     return;
   }
 
+  currentPlatform = YTD_SETTINGS.detectPlatform(url);
   const newVideoId = extractVideoId(url);
   // Refresh when the video changed, or when we're not currently showing
   // results (e.g. user went home, then clicked back into the same video).
@@ -459,50 +479,29 @@ function setNotesFilter(showAll) {
 
 async function checkCurrentTab() {
   try {
-    // Try multiple strategies to find the Bilibili tab
-    let tab = null;
-    const diagnostics = [];
-
-    // Strategy 1: Active tab in last focused window
-    let tabs = await chrome.tabs.query({
+    // The panel belongs only to the active tab. Falling back to another
+    // background video tab can show the wrong transcript on an unrelated page.
+    const tabs = await chrome.tabs.query({
       active: true,
       lastFocusedWindow: true,
     });
-    diagnostics.push(
-      "活动标签页: " + (tabs[0]?.url || "(无 URL 权限或非网页)")
-    );
-    if (tabs[0]?.url?.includes("bilibili.com/video/")) {
-      tab = tabs[0];
-    }
-
-    // Strategy 2: Any active Bilibili tab
-    if (!tab) {
-      tabs = await chrome.tabs.query({
-        url: "https://www.bilibili.com/video/*",
-        active: true,
-      });
-      if (tabs[0]) tab = tabs[0];
-    }
-
-    // Strategy 3: Any Bilibili tab (last resort)
-    if (!tab) {
-      tabs = await chrome.tabs.query({ url: "https://www.bilibili.com/video/*" });
-      if (tabs[0]) tab = tabs[0];
-    }
+    const tab = tabs[0] || null;
 
     debugLog("[dk-bilidown Panel] Found tab:", tab?.id, tab?.url);
 
     if (!tab?.url) {
-      showWelcome(
-        "未检测到 B 站视频。\n" +
-          diagnostics.join("\n") +
-          "\n提示：需要打开 https://www.bilibili.com/video/BV… 格式的视频页面。"
-      );
+      showWelcome("未检测到支持的视频。请打开 B 站或 YouTube 视频页。");
+      return;
+    }
+
+    if (!YTD_SETTINGS.isSupportedVideoUrl(tab.url)) {
+      handleFrontTabUrl(tab.url);
       return;
     }
 
     // Store the tab ID for reliable messaging later
-    bilibiliTabId = tab.id;
+    activeVideoTabId = tab.id;
+    currentPlatform = YTD_SETTINGS.detectPlatform(tab.url);
 
     const videoId = extractVideoId(tab.url);
 
@@ -530,12 +529,12 @@ async function checkCurrentTab() {
         currentVideoDuration = 0;
       }
 
-      startBilidown(videoId, tab.url);
+      startBilidown(videoId, tab.url, currentPlatform);
     } else {
       showWelcome(
-        "未匹配到 B 站视频地址。\n当前页面: " +
+        "未匹配到支持的视频地址。\n当前页面: " +
           (tab.url || "(无 URL)") +
-          "\n提示：需要 https://www.bilibili.com/video/BV… 格式（暂不支持番剧/直播页）。"
+          "\n提示：当前支持普通 B 站视频页和 YouTube watch / shorts / live 页面。"
       );
     }
   } catch (error) {
@@ -548,10 +547,26 @@ function extractVideoId(url) {
   try {
     const urlObj = new URL(url);
 
-    const match = urlObj.pathname.match(/\/video\/(BV[A-Za-z0-9]{10})/i);
-    if (urlObj.hostname.endsWith("bilibili.com") && match) {
+    const bilibiliMatch = urlObj.pathname.match(/\/video\/(BV[A-Za-z0-9]{10})/i);
+    if (urlObj.hostname.endsWith("bilibili.com") && bilibiliMatch) {
       const part = Math.max(1, Number(urlObj.searchParams.get("p")) || 1);
-      return `${match[1]}@p${part}`;
+      return `${bilibiliMatch[1]}@p${part}`;
+    }
+
+    if (
+      urlObj.hostname === "youtube.com" ||
+      urlObj.hostname.endsWith(".youtube.com")
+    ) {
+      const watchId = urlObj.searchParams.get("v");
+      if (watchId) return watchId;
+      const pathMatch = urlObj.pathname.match(
+        /^\/(?:shorts|live|embed)\/([^/?#]+)/,
+      );
+      if (pathMatch) return pathMatch[1];
+    }
+
+    if (urlObj.hostname === "youtu.be") {
+      return urlObj.pathname.split("/").filter(Boolean)[0] || null;
     }
 
     return null;
@@ -564,8 +579,11 @@ function extractVideoId(url) {
 // BILIDOWN PIPELINE
 // ============================================================
 
-async function startBilidown(videoId, videoUrl) {
+async function startBilidown(videoId, videoUrl, platform = null) {
   const gen = ++generation;
+  const resolvedPlatform =
+    platform || YTD_SETTINGS.detectPlatform(videoUrl) || currentPlatform;
+  currentPlatform = resolvedPlatform;
   // Check if we already have this video loaded in memory
   if (videoId === currentVideoId && currentAnalysis) {
     showState("results");
@@ -660,6 +678,7 @@ async function startBilidown(videoId, videoUrl) {
   const transcriptResult = await chrome.runtime.sendMessage({
     action: "fetchTranscript",
     videoId: videoId.split("@p")[0],
+    platform: resolvedPlatform,
     pageNumber: Math.max(
       1,
       Number(String(videoId.split("@p")[1] || "1").replace(/^p/i, "")) || 1,
@@ -674,7 +693,13 @@ async function startBilidown(videoId, videoUrl) {
     // generic "no reliable subtitles" copy when the failure has a known
     // signature (duration limit, ASR provider error, missing subtitles).
     let title;
-    if (detail.includes("百炼") || detail.includes("音轨")) {
+    if (transcriptResult.error === "NO_SUPADATA_KEY") {
+      title = "需要配置 YouTube 字幕服务";
+    } else if (
+      detail.includes("百炼") ||
+      detail.includes("音轨") ||
+      detail.includes("Whisper")
+    ) {
       title = "语音识别失败";
     } else if (
       detail.includes("MiniMax") ||
@@ -700,7 +725,11 @@ async function startBilidown(videoId, videoUrl) {
   currentTranscriptText = transcriptResult.transcriptText;
   currentTranscriptTimestamped = transcriptResult.transcriptTextTimestamped;
   currentTranscriptLanguage = transcriptResult.language || null;
-  currentTranscriptSource = transcriptResult.source || "bilibili-subtitle";
+  currentTranscriptSource =
+    transcriptResult.source ||
+    (resolvedPlatform === "youtube"
+      ? "youtube-supadata"
+      : "bilibili-subtitle");
   updateTranscriptLanguageModes();
 
   // Render transcript immediately (no LLM needed)
@@ -823,6 +852,7 @@ async function saveQuoteAsNote(quote, btn) {
     const result = await chrome.runtime.sendMessage({
       action: "saveNote",
       videoId: currentVideoId,
+      platform: currentPlatform,
       timestamp: quote.timestampSeconds,
       videoTitle: currentVideoTitle,
       channelName: currentChannelName,
@@ -900,18 +930,23 @@ function renderTranscript() {
   const transcriptList = document.getElementById("transcriptList");
   transcriptList.innerHTML = "";
 
-  // Show a small badge indicating the transcript came from the video's
-  // existing subtitles. (We no longer AI-transcribe audio, so subtitles
-  // are the only source.)
+  // Show a small badge indicating which transcript source was used.
   const existingBadge = document.getElementById("transcriptSourceBadge");
   if (existingBadge) existingBadge.remove();
 
   const badge = document.createElement("div");
   badge.id = "transcriptSourceBadge";
   badge.className = "transcript-source-badge";
-  const sourceLabel = currentTranscriptSource === "aliyun-fun-asr"
-    ? "阿里云 Fun-ASR 语音识别"
-    : "B站视频字幕";
+  const sourceLabels = {
+    "aliyun-fun-asr": "阿里云 Fun-ASR 语音识别",
+    "minimax-asr-1.0": "minimasr-1.0 语音识别",
+    "local-whisper": "本地 Whisper 语音识别",
+    "bilibili-subtitle": "B站视频字幕",
+    "youtube-supadata": "YouTube 原生字幕",
+  };
+  const sourceLabel =
+    sourceLabels[currentTranscriptSource] ||
+    (currentPlatform === "youtube" ? "YouTube 原生字幕" : "B站视频字幕");
   badge.innerHTML = `<span class="source-dot source-dot--subs"></span> ${sourceLabel} · ${escapeHtml(getOriginalTranscriptLabel())}`;
   transcriptList.parentElement.insertBefore(badge, transcriptList);
 
@@ -943,6 +978,9 @@ function renderTranscript() {
 }
 
 function currentCanonicalVideoUrl() {
+  if (currentPlatform === "youtube") {
+    return `https://www.youtube.com/watch?v=${String(currentVideoId || "")}`;
+  }
   const [bvid, partToken] = String(currentVideoId || "").split("@p");
   return `https://www.bilibili.com/video/${bvid}${Number(partToken) > 1 ? `?p=${Number(partToken)}` : ""}`;
 }
@@ -992,8 +1030,9 @@ function buildMarkdownExport() {
 
 function buildHtmlExport() {
   const entries = exportTranscriptEntries();
+  const canonicalUrl = currentCanonicalVideoUrl();
   const chapters = (currentAnalysis?.chapters || []).map((chapter) => `
-    <article class="chapter"><a href="${escapeHtml(currentCanonicalVideoUrl())}?t=${Number(chapter.timestampSeconds) || 0}s">${escapeHtml(chapter.timestamp)}</a><div><strong>${escapeHtml(chapter.title)}</strong><p>${escapeHtml(chapter.summary || "")}</p></div></article>`).join("");
+    <article class="chapter"><a href="${escapeHtml(`${canonicalUrl}${canonicalUrl.includes("?") ? "&" : "?"}t=${Number(chapter.timestampSeconds) || 0}s`)}">${escapeHtml(chapter.timestamp)}</a><div><strong>${escapeHtml(chapter.title)}</strong><p>${escapeHtml(chapter.summary || "")}</p></div></article>`).join("");
   const quotes = (currentAnalysis?.keyQuotes || []).map((quote) => `
     <blockquote><b>${escapeHtml(quote.timestamp)}</b>${escapeHtml(quote.quote)}</blockquote>`).join("");
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(currentVideoTitle || "B站视频学习笔记")}</title><style>
@@ -1048,6 +1087,7 @@ async function saveTranscriptAsNote() {
     const result = await chrome.runtime.sendMessage({
       action: "saveSummaryNote",
       videoId: currentVideoId,
+      platform: currentPlatform,
       videoTitle: currentVideoTitle || "",
       channelName: currentChannelName || "",
       summaryText: text,
@@ -1152,6 +1192,7 @@ async function saveFullSummaryAsNote() {
     const result = await chrome.runtime.sendMessage({
       action: "saveSummaryNote",
       videoId: currentVideoId,
+      platform: currentPlatform,
       videoTitle: currentVideoTitle || "",
       channelName: currentChannelName || "",
       summaryText: currentSummary,
@@ -1233,11 +1274,13 @@ function showError(title, message) {
 function showConfigError(configStatus) {
   const missingKeys = [];
   if (!configStatus.hasAiKey) missingKeys.push("AI 模型 API 密钥");
+  if (!configStatus.hasAsrProvider) missingKeys.push("可用的语音识别服务");
+  if (!configStatus.hasSupadataKey) missingKeys.push("YouTube Supadata API 密钥");
 
   showState("error");
-  document.getElementById("errorTitle").textContent = "还没有配置 API 密钥";
+  document.getElementById("errorTitle").textContent = "还没有完成基本配置";
   document.getElementById("errorMessage").textContent =
-    `请先在 bilidown 设置中填写${missingKeys.join("和")}。`;
+    `请先在 bilidown 设置中填写${missingKeys.join("和")}。B 站视频可配置 ASR 或直接使用原生字幕；YouTube 视频需要 Supadata 密钥。`;
   document.getElementById("errorBtn").textContent = "打开设置";
   errorAction = () => chrome.runtime.sendMessage({ action: "openOptions" });
 }
@@ -1536,9 +1579,9 @@ async function seekTo(seconds) {
 
   try {
     // Try direct messaging to the stored Bilibili tab first (fastest/reliable)
-    if (bilibiliTabId) {
+    if (activeVideoTabId) {
       try {
-        await chrome.tabs.sendMessage(bilibiliTabId, payload);
+        await chrome.tabs.sendMessage(activeVideoTabId, payload);
         debugLog("[dk-bilidown Panel] seekTo direct success");
         return;
       } catch (directErr) {
@@ -1923,12 +1966,31 @@ async function loadFromCache(videoId) {
     if (!cached) return null;
 
     const storedSettings = await chrome.storage.local.get(YTD_SETTINGS.STORAGE_KEY);
-    const wantsAsr = !!YTD_SETTINGS.normalize(
+    const settings = YTD_SETTINGS.normalize(
       storedSettings[YTD_SETTINGS.STORAGE_KEY],
-    ).asrApiKey;
-    if (wantsAsr && cached.transcriptSource !== "aliyun-fun-asr") {
+    );
+    if (
+      currentPlatform === "youtube" &&
+      settings.supadataApiKey &&
+      cached.transcriptSource !== "youtube-supadata"
+    ) {
       await chrome.storage.local.remove(`bilidown_${videoId}`);
       return null;
+    }
+    if (
+      currentPlatform !== "youtube" &&
+      YTD_SETTINGS.isAsrProviderConfigured(settings)
+    ) {
+      const asrSourceByProvider = {
+        bailian: "aliyun-fun-asr",
+        minimax: "minimax-asr-1.0",
+        whisper: "local-whisper",
+      };
+      const expectedSource = asrSourceByProvider[settings.asrProvider];
+      if (expectedSource && cached.transcriptSource !== expectedSource) {
+        await chrome.storage.local.remove(`bilidown_${videoId}`);
+        return null;
+      }
     }
 
     // Earlier Bilibili builds parsed "@p2" with Number("p2"), silently

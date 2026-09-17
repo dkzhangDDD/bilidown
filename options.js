@@ -9,13 +9,23 @@ const YTD_OPTIONS = (() => {
       languageGroupLabel: "Interface language",
       heading: "Bring your own API keys",
       lede:
-        "Keys stay in this Chrome profile. Audio is sent to Alibaba Bailian for ASR, while transcripts and context are sent to DeepSeek for AI features.",
-      asrService: "Speech-to-text service",
+        "Keys stay in this Chrome profile. Bilibili audio is sent only to the ASR service you select. YouTube native captions are requested from Supadata, while transcripts and context are sent to your chosen AI provider.",
+      asrService: "Bilibili recognition",
       asrServiceIntro:
-        "When an ASR provider is configured, bilinote uses it to transcribe audio. Otherwise it falls back to native Bilibili subtitles.",
+        "Bilibili native subtitles are checked first. Only when none are available does bilidown use the selected ASR provider.",
       asrProviderLabel: "Transcription engine",
       asrProviderBailian: "Aliyun Bailian Fun-ASR",
       asrProviderMinimax: "minimasr asr-1.0",
+      asrProviderWhisper: "Local Whisper",
+      whisperEndpointLabel: "Local service URL",
+      whisperModelLabel: "Model name",
+      whisperApiKeyLabel: "API key (optional)",
+      whisperAsrHelp:
+        "Supports an OpenAI-compatible /v1/audio/transcriptions endpoint or whisper.cpp's /inference endpoint. bilidown sends the Bilibili audio to this local service and reads timestamped segments. whisper.cpp must run with --convert because Bilibili audio is M4A.",
+      whisperPrivacyNote:
+        "The URL must use http://localhost or http://127.0.0.1. Audio is sent only to that local port and never to a developer server.",
+      invalidWhisperEndpoint:
+        "Enter an http://localhost or http://127.0.0.1 URL for Local Whisper.",
       bailianAsrKeyLabel: "Bailian API key",
       bailianAsrHelp:
         "bilinote downloads the B station audio, uploads it to a 48-hour Bailian staging bucket, and runs Fun-ASR async. Works for any video length.",
@@ -26,9 +36,9 @@ const YTD_OPTIONS = (() => {
       minimaxAsrKeyNote:
         "Reuses the MiniMax key you entered in the AI model section above. No second key required.",
       addAsrKey: "Add an API key for the selected ASR provider.",
-      transcriptProvider: "Transcript provider",
+      transcriptProvider: "YouTube recognition",
       supadataApiKeyLabel: "Supadata API key",
-      supadataHelp: "Used to fetch timestamped Bilibili subtitles. ",
+      supadataHelp: "Used to fetch timestamped YouTube native captions. ",
       supadataLink: "Create a Supadata account and key",
       supadataHelpSuffix:
         ". Supadata generates the key during onboarding.",
@@ -106,13 +116,23 @@ const YTD_OPTIONS = (() => {
       languageGroupLabel: "界面语言",
       heading: "bilidown 设置",
       lede:
-        "密钥仅保存在当前 Chrome 个人资料中。音频会发送给阿里云百炼进行语音识别，字幕和视频上下文会发送给 DeepSeek 生成概览等内容。",
-      asrService: "语音识别服务",
+        "密钥仅保存在当前 Chrome 个人资料中。B 站音频只会发送给你选择的语音识别服务；YouTube 原生字幕由 Supadata 获取；字幕和视频上下文会发送给你选择的 AI 服务。",
+      asrService: "B站识别",
       asrServiceIntro:
-        "配置识别服务后，bilinote 会优先使用识别后的字幕；未配置时回退到 B 站原生字幕。",
+        "bilidown 会先检查 B 站原生字幕；只有没有可用字幕时，才使用所选的语音识别服务。",
       asrProviderLabel: "识别引擎",
       asrProviderBailian: "阿里云百炼 Fun-ASR",
       asrProviderMinimax: "minimasr asr-1.0",
+      asrProviderWhisper: "本地 Whisper",
+      whisperEndpointLabel: "本机服务地址",
+      whisperModelLabel: "模型名称",
+      whisperApiKeyLabel: "API Key（可选）",
+      whisperAsrHelp:
+        "支持 OpenAI 兼容的 /v1/audio/transcriptions，也可直接填写 whisper.cpp 的 /inference 地址。扩展会把 B 站音轨发送到该本机服务并读取分段结果。B 站音轨是 M4A，whisper.cpp 需启用 --convert 并安装 ffmpeg。",
+      whisperPrivacyNote:
+        "地址必须使用 http://localhost 或 http://127.0.0.1。音频只发送到本机端口，不会经过开发者服务器。",
+      invalidWhisperEndpoint:
+        "请为本地 Whisper 填写 http://localhost 或 http://127.0.0.1 开头的服务地址。",
       bailianAsrKeyLabel: "百炼 API 密钥",
       bailianAsrHelp:
         "bilinote 会下载当前B站音轨，上传到百炼 48 小时临时空间，使用 Fun-ASR 异步识别生成带时间戳字幕，适合任意时长。",
@@ -123,9 +143,9 @@ const YTD_OPTIONS = (() => {
       minimaxAsrKeyNote:
         "复用上方「AI 服务」中填写的 MiniMax Key，无需在此重复填写。",
       addAsrKey: "请为当前选择的语音识别服务填写 API 密钥。",
-      transcriptProvider: "字幕服务",
+      transcriptProvider: "YouTube识别",
       supadataApiKeyLabel: "Supadata API 密钥",
-      supadataHelp: "用于获取带时间戳的 Bilibili 字幕。",
+      supadataHelp: "用于获取带时间戳的 YouTube 原生字幕。",
       supadataLink: "创建 Supadata 账号并获取密钥",
       supadataHelpSuffix: "。Supadata 会在引导流程中生成密钥。",
       aiProvider: "AI 模型",
@@ -343,7 +363,11 @@ const YTD_OPTIONS = (() => {
       verified.aiApiKey !== settings.aiApiKey ||
       verified.minimaxApiKey !== settings.minimaxApiKey ||
       verified.customApiKey !== settings.customApiKey ||
-      verified.asrApiKey !== settings.asrApiKey
+      verified.asrApiKey !== settings.asrApiKey ||
+      verified.whisperEndpoint !== settings.whisperEndpoint ||
+      verified.whisperModel !== settings.whisperModel ||
+      verified.whisperApiKey !== settings.whisperApiKey ||
+      verified.supadataApiKey !== settings.supadataApiKey
     ) {
       throw new Error("SETTINGS_WRITE_VERIFICATION_FAILED");
     }
@@ -445,8 +469,13 @@ const YTD_OPTIONS = (() => {
     const customProviderGroup = doc.getElementById("customProviderGroup");
     const asrApiKeyInput = doc.getElementById("asrApiKey");
     const asrProviderSelect = doc.getElementById("asrProviderSelect");
+    const supadataApiKeyInput = doc.getElementById("supadataApiKey");
     const bailianAsrGroup = doc.getElementById("bailianAsrGroup");
     const minimaxAsrGroup = doc.getElementById("minimaxAsrGroup");
+    const whisperAsrGroup = doc.getElementById("whisperAsrGroup");
+    const whisperEndpointInput = doc.getElementById("whisperEndpoint");
+    const whisperModelInput = doc.getElementById("whisperModel");
+    const whisperApiKeyInput = doc.getElementById("whisperApiKey");
     const customizationPrompt = doc.getElementById("customizationPrompt");
     const copyCustomizationPromptBtn = doc.getElementById(
       "copyCustomizationPromptBtn",
@@ -487,6 +516,8 @@ const YTD_OPTIONS = (() => {
         normalized === "bailian" ? "" : "none";
       minimaxAsrGroup.style.display =
         normalized === "minimax" ? "" : "none";
+      whisperAsrGroup.style.display =
+        normalized === "whisper" ? "" : "none";
     }
 
     function setStatus(element, key, params = {}) {
@@ -546,6 +577,10 @@ const YTD_OPTIONS = (() => {
         customBaseUrlInput.value = settings.customBaseUrl;
         customModelInput.value = settings.customModel;
         asrApiKeyInput.value = settings.asrApiKey;
+        supadataApiKeyInput.value = settings.supadataApiKey;
+        whisperEndpointInput.value = settings.whisperEndpoint;
+        whisperModelInput.value = settings.whisperModel;
+        whisperApiKeyInput.value = settings.whisperApiKey;
         applyProviderSelection(settings.provider);
         asrProviderSelect.value = settings.asrProvider;
         applyAsrProviderSelection(settings.asrProvider);
@@ -580,10 +615,25 @@ const YTD_OPTIONS = (() => {
         customBaseUrl: customBaseUrlInput.value,
         customModel: customModelInput.value,
         asrApiKey: asrApiKeyInput.value,
+        supadataApiKey: supadataApiKeyInput.value,
+        whisperEndpoint: whisperEndpointInput.value,
+        whisperModel: whisperModelInput.value,
+        whisperApiKey: whisperApiKeyInput.value,
       });
 
+      if (
+        settings.asrProvider === "whisper" &&
+        !settingsApi.isValidWhisperEndpoint(settings.whisperEndpoint)
+      ) {
+        setStatus(saveStatus, "invalidWhisperEndpoint");
+        return;
+      }
+
       if (!settingsApi.resolveAiApiKey(settings)) {
-        if (!settingsApi.resolveAsrApiKey(settings)) {
+        if (
+          !settingsApi.isAsrProviderConfigured(settings) &&
+          !settings.supadataApiKey
+        ) {
           setStatus(saveStatus, "addDeepseekKey");
           return;
         }

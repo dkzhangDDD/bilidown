@@ -3,7 +3,7 @@
  *
  * This is the "brain" of the extension. It runs in the background and handles:
  * 1. Opening the side panel when the user clicks the extension icon
- * 2. Fetching Bilibili transcripts via Supadata API
+ * 2. Fetching Bilibili native subtitles (ASR fallback) and YouTube captions
  * 3. Calling DeepSeek to analyze the transcript
  * 4. Sending results back to the side panel
  *
@@ -23,7 +23,7 @@ const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
 };
 
-// Prevent the Bilibili content script from reading API keys or cached data.
+// Prevent page content scripts from reading API keys or cached data.
 // Side panel, options, and service-worker contexts remain trusted.
 chrome.storage.local
   .setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" })
@@ -244,6 +244,11 @@ async function readBoundedAiResponse(response, onActivity) {
  * Chrome's Side Panel API lets us show a persistent panel alongside the page.
  */
 chrome.action.onClicked.addListener((tab) => {
+  if (!YTD_SETTINGS.isSupportedVideoUrl(tab.url)) {
+    updatePanelForTab(tab.id, tab.url, tab.windowId);
+    return;
+  }
+
   // Re-enable + open without awaiting — preserves user gesture context
   chrome.sidePanel.setOptions({
     tabId: tab.id,
@@ -254,7 +259,7 @@ chrome.action.onClicked.addListener((tab) => {
 });
 
 /**
- * Allow the side panel to open on any page, but it's designed for Bilibili.
+ * Allow the side panel to open on supported video pages.
  */
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 
@@ -263,11 +268,11 @@ chrome.runtime.onInstalled.addListener(({ reason }) => {
 });
 
 /**
- * Keep the side panel scoped to Bilibili tabs only.
+ * Keep the side panel scoped to supported video tabs only.
  *
  * Chrome side panels are "global" by default: once opened, the panel follows
- * you to every tab. To make dk-bilidown behave like a Bilibili-only tool, we
- * enable the panel on Bilibili tabs and disable it everywhere else. Disabling
+ * you to every tab. To make bilidown behave like a video-only tool, we
+ * enable the panel on Bilibili/YouTube tabs and disable it everywhere else. Disabling
  * on a tab makes Chrome hide/close the panel for that tab, so it never lingers
  * on a new tab or some other website.
  *
@@ -278,10 +283,10 @@ chrome.runtime.onInstalled.addListener(({ reason }) => {
  * visible when switching to an already-loaded non-Bilibili tab.
  */
 function updatePanelForTab(tabId, url) {
-  const isBilibili = /^https:\/\/www\.bilibili\.com\/video\//.test(url || "");
+  const isSupported = YTD_SETTINGS.isSupportedVideoUrl(url);
   // setOptions can reject if the tab just closed — ignore that harmlessly.
   chrome.sidePanel
-    .setOptions({ tabId, path: "sidepanel.html", enabled: isBilibili })
+    .setOptions({ tabId, path: "sidepanel.html", enabled: isSupported })
     .catch(() => {});
 }
 
@@ -312,7 +317,12 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // We need to return true to indicate we'll respond asynchronously
   if (message.action === "fetchTranscript") {
-    handleFetchTranscript(message.videoId, message.videoUrl, message.pageNumber)
+    handleFetchTranscript(
+      message.videoId,
+      message.videoUrl,
+      message.pageNumber,
+      message.platform,
+    )
       .then(sendResponse)
       .catch((err) => sendResponse({ error: err.message }));
     return true; // Keep the message channel open for async response
@@ -363,6 +373,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       message.timestamp,
       message.videoTitle,
       message.channelName,
+      message.platform || YTD_SETTINGS.detectPlatform(sender.tab?.url),
     )
       .then(sendResponse)
       .catch((err) => sendResponse({ success: false, error: err.message }));
@@ -376,6 +387,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       message.videoTitle,
       message.channelName,
       message.summaryText,
+      message.platform || YTD_SETTINGS.detectPlatform(sender.tab?.url),
     )
       .then(sendResponse)
       .catch((err) => sendResponse({ success: false, error: err.message }));
@@ -422,7 +434,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     getSettings()
       .then((settings) =>
         sendResponse({
-          hasSupadataKey: true,
+          hasSupadataKey: !!settings.supadataApiKey,
+          hasAsrProvider: YTD_SETTINGS.isAsrProviderConfigured(settings),
           hasAiKey: !!YTD_SETTINGS.resolveAiApiKey(settings),
         }),
       )
@@ -493,7 +506,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     debugLog("[dk-bilidown BG] Relay request:", message.payload?.action);
     (async () => {
       try {
-        // Query specifically for Bilibili tabs to avoid side panel context issues
+        // Query specifically for supported video tabs to avoid side panel context issues
         // Try multiple query strategies to find the right tab
         let tabs = await chrome.tabs.query({
           active: true,
@@ -505,19 +518,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           tabs[0]?.url,
         );
 
-        // If no Bilibili tab found, try broader query
-        if (!tabs[0] || !tabs[0].url?.includes("bilibili.com/video/")) {
+        // If the active tab is unsupported, try active Bilibili/YouTube tabs.
+        if (!tabs[0] || !YTD_SETTINGS.isSupportedVideoUrl(tabs[0].url)) {
           tabs = await chrome.tabs.query({
-            url: "https://www.bilibili.com/video/*",
+            url: [
+              "https://www.bilibili.com/video/*",
+              "https://www.youtube.com/*",
+              "https://youtu.be/*",
+            ],
             active: true,
           });
-          debugLog("[dk-bilidown BG] Active Bilibili tabs:", tabs.length);
+          debugLog("[dk-bilidown BG] Active supported tabs:", tabs.length);
         }
 
-        // Still nothing? Try any Bilibili tab
+        // Still nothing? Try any supported video tab.
         if (!tabs[0]) {
-          tabs = await chrome.tabs.query({ url: "https://www.bilibili.com/video/*" });
-          debugLog("[dk-bilidown BG] Any Bilibili tabs:", tabs.length);
+          tabs = await chrome.tabs.query({
+            url: [
+              "https://www.bilibili.com/video/*",
+              "https://www.youtube.com/*",
+              "https://youtu.be/*",
+            ],
+          });
+          debugLog("[dk-bilidown BG] Any supported tabs:", tabs.length);
         }
 
         if (tabs[0]) {
@@ -532,21 +555,30 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             message.payload,
           );
 
-          // For getVideoInfo, PREFER Bilibili's own player data over the
-          // DOM scrape. The player's videoDetails is canonical: its `author`
-          // is always THIS video's channel and its `shortDescription` is the
-          // full text. The DOM scrape is unreliable — e.g. on a playlist page
-          // it grabbed the playlist owner's name ("Zara Zhang") instead of the
-          // real channel ("Replit and Stripe"), and its description is
-          // truncated while the box is collapsed. We fall back to the DOM
-          // only for fields the player didn't provide.
-          // Bilibili metadata is read from the rendered page by content.js.
+          // YouTube exposes the full description through the player object,
+          // while Bilibili metadata is read from the rendered page.
+          if (
+            message.payload?.action === "getVideoInfo" &&
+            YTD_SETTINGS.detectPlatform(tabs[0].url) === "youtube"
+          ) {
+            const playerInfo = await getPlayerVideoDetails(tabs[0].id);
+            if (playerInfo) {
+              response = {
+                title: playerInfo.title || response?.title || "",
+                channelName:
+                  playerInfo.channelName || response?.channelName || "",
+                duration: playerInfo.duration || response?.duration || 0,
+                description:
+                  playerInfo.description || response?.description || "",
+              };
+            }
+          }
 
           debugLog("[dk-bilidown BG] Got response from content:", response);
           sendResponse({ success: true, response });
         } else {
-          debugLog("[dk-bilidown BG] No Bilibili tab found");
-          sendResponse({ success: false, error: "No Bilibili tab found" });
+          debugLog("[dk-bilidown BG] No supported video tab found");
+          sendResponse({ success: false, error: "No supported video tab found" });
         }
       } catch (err) {
         console.error("[dk-bilidown BG] Relay error:", err.message);
@@ -556,6 +588,39 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true; // Keep channel open for async response
   }
 });
+
+/**
+ * Reads full YouTube metadata from the page's player object. The DOM only
+ * contains truncated descriptions, while getPlayerResponse() has the same
+ * canonical videoDetails that the mature upstream project uses.
+ */
+async function getPlayerVideoDetails(tabId) {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: () => {
+        try {
+          const player = document.getElementById("movie_player");
+          const details = player?.getPlayerResponse?.()?.videoDetails;
+          if (!details) return null;
+          return {
+            title: details.title || "",
+            channelName: details.author || "",
+            description: details.shortDescription || "",
+            duration: Number(details.lengthSeconds) || 0,
+          };
+        } catch (_error) {
+          return null;
+        }
+      },
+    });
+    return results?.[0]?.result || null;
+  } catch (error) {
+    console.warn("[bilidown BG] Player details unavailable:", error.message);
+    return null;
+  }
+}
 
 // ============================================================
 // TRANSCRIPT FETCHING VIA BILIBILI API
@@ -720,11 +785,27 @@ async function transcribeWithMinimax(videoId, cid, apiKey) {
   form.append("response_format", "verbose_json");
   form.append("timestamp_level", "sentence");
   form.append("file", blob, videoId + ".m4a");
-  const response = await fetch(meta.endpoint, {
-    method: "POST",
-    headers: { Authorization: "Bearer " + apiKey },
-    body: form,
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 180_000);
+  let response;
+  try {
+    response = await fetch(meta.endpoint, {
+      method: "POST",
+      headers: { Authorization: "Bearer " + apiKey },
+      body: form,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error(
+        "MiniMax ASR request timed out after 180 seconds. " +
+        "Check the MiniMax key and service status, or switch to Aliyun Bailian / Local Whisper.",
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
   const text = await response.text();
   let payload;
   try { payload = JSON.parse(text); } catch (_e) {
@@ -787,9 +868,156 @@ function normalizeMinimaxTranscript(payload) {
 }
 
 // ---------------------------------------------------------------
-// ASR dispatcher: routes to the provider selected in settings.
-// Falls back to B station native subtitles only when no ASR
-// provider key is configured.
+// Local Whisper
+//
+// Targets a user-run HTTP service, normally an OpenAI-compatible
+// /v1/audio/transcriptions endpoint or whisper.cpp's /inference
+// endpoint. Audio never leaves the machine when the configured
+// endpoint is localhost or 127.0.0.1.
+// ---------------------------------------------------------------
+
+async function transcribeWithLocalWhisper(videoId, cid, settings) {
+  const endpoint = YTD_SETTINGS.resolveAsrEndpoint(settings);
+  const model = YTD_SETTINGS.resolveAsrModel(settings);
+  const apiKey = YTD_SETTINGS.resolveAsrApiKey(settings);
+  if (!YTD_SETTINGS.isValidWhisperEndpoint(endpoint)) {
+    throw new Error(
+      "Local Whisper endpoint must use http://localhost or http://127.0.0.1.",
+    );
+  }
+
+  chrome.runtime.sendMessage({
+    action: "transcriptProgress",
+    title: "正在下载B站音轨",
+    subtitle: "本地 Whisper 识别，请保持本机服务运行",
+  }).catch(() => {});
+  const blob = await fetchBilibiliAudioBlob(videoId, cid);
+
+  chrome.runtime.sendMessage({
+    action: "transcriptProgress",
+    title: "正在发送到本地 Whisper",
+    subtitle: `本机服务 · ${(blob.size / 1024 / 1024).toFixed(1)} MB`,
+  }).catch(() => {});
+
+  const form = new FormData();
+  form.append("file", blob, `${videoId}.m4a`);
+  form.append("response_format", "verbose_json");
+  if (model) form.append("model", model);
+
+  const headers = {};
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+
+  let response;
+  try {
+    response = await fetch(endpoint, {
+      method: "POST",
+      headers,
+      body: form,
+    });
+  } catch (error) {
+    throw new Error(
+      `无法连接本地 Whisper（${endpoint}）：${error.message || "连接失败"}`,
+    );
+  }
+
+  const rawText = await response.text();
+  let payload = null;
+  let jsonError = null;
+  try {
+    payload = rawText ? JSON.parse(rawText) : null;
+  } catch (error) {
+    jsonError = error;
+  }
+
+  if (!response.ok) {
+    const message =
+      payload?.error?.message ||
+      payload?.message ||
+      rawText.slice(0, 300) ||
+      `HTTP ${response.status}`;
+    throw new Error(`本地 Whisper 识别失败（HTTP ${response.status}）：${message}`);
+  }
+  if (jsonError) {
+    const contentType = response.headers.get("content-type") || "unknown";
+    const plainPreview = rawText
+      .replace(/<[^>]*>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 180);
+    const serviceHint = /clodop|lodop/i.test(rawText)
+      ? "检测到 C-Lodop 页面。8000 端口可能被打印服务占用，请改用 Whisper 服务的实际端口。"
+      : "请确认地址是 Whisper 的推理接口，而不是其他网页或服务。";
+    throw new Error(
+      `本地 Whisper 返回的不是 JSON（HTTP ${response.status}, ${contentType}）。${serviceHint}` +
+        (plainPreview ? ` 响应开头：${plainPreview}` : ""),
+    );
+  }
+  if (!payload) {
+    throw new Error("本地 Whisper 返回了空响应。");
+  }
+
+  chrome.runtime.sendMessage({
+    action: "transcriptProgress",
+    title: "正在解析字幕",
+    subtitle: "本地 Whisper 识别结果",
+  }).catch(() => {});
+  return normalizeLocalWhisperTranscript(payload);
+}
+
+function normalizeLocalWhisperTranscript(payload) {
+  if (!payload || typeof payload !== "object") {
+    throw new Error("本地 Whisper 返回格式无效：预期 JSON 对象。");
+  }
+  const rawSegments = Array.isArray(payload.segments)
+    ? payload.segments
+    : Array.isArray(payload.transcription)
+      ? payload.transcription
+      : [];
+  const transcript = rawSegments
+    .map((segment) => {
+      const start = Math.max(0, Number(segment.start) || 0);
+      const end = Math.max(start, Number(segment.end) || start);
+      return {
+        text: String(segment.text || "").trim(),
+        start,
+        duration: Math.max(0, end - start),
+        language: String(payload.language || payload.lang || "auto"),
+      };
+    })
+    .filter((segment) => segment.text);
+
+  if (!transcript.length && String(payload.text || "").trim()) {
+    transcript.push({
+      text: String(payload.text).trim(),
+      start: 0,
+      duration: Math.max(0, Number(payload.duration) || 0),
+      language: String(payload.language || payload.lang || "auto"),
+    });
+  }
+  if (!transcript.length) {
+    throw new Error("本地 Whisper 返回了空转写结果。");
+  }
+
+  let plain = "";
+  let timestamped = "";
+  for (const segment of transcript) {
+    const minutes = Math.floor(segment.start / 60);
+    const seconds = Math.floor(segment.start % 60);
+    plain += `${segment.text} `;
+    timestamped += `[${minutes}:${String(seconds).padStart(2, "0")}] ${segment.text}\n`;
+  }
+  return {
+    success: true,
+    transcript,
+    transcriptText: plain.trim(),
+    transcriptTextTimestamped: timestamped.trim(),
+    language: transcript[0].language || "auto",
+    source: "local-whisper",
+  };
+}
+
+// ---------------------------------------------------------------
+// ASR dispatcher: used only after Bilibili native subtitles are unavailable.
 // ---------------------------------------------------------------
 
 async function dispatchAsr(videoId, cid, settings) {
@@ -797,19 +1025,23 @@ async function dispatchAsr(videoId, cid, settings) {
   const meta = YTD_SETTINGS.ASR_PROVIDERS[provider];
   if (!meta) throw new Error("Unknown ASR provider: " + provider);
   const apiKey = YTD_SETTINGS.resolveAsrApiKey(settings);
-  if (!apiKey) {
+  if (!YTD_SETTINGS.isAsrProviderConfigured(settings)) {
     throw new Error("Provider " + meta.label + " selected but no API key configured. Fill it in Settings.");
   }
+  const endpoint = YTD_SETTINGS.resolveAsrEndpoint(settings);
   // Surface the route choice in both the console and the sidepanel progress
   // text so a user can verify at a glance which provider was actually used.
-  console.log("[bilinote] ASR dispatch: provider=" + provider + " endpoint=" + meta.endpoint + " keyLen=" + apiKey.length);
+  console.log("[bilinote] ASR dispatch: provider=" + provider + " endpoint=" + endpoint + " keyLen=" + apiKey.length);
   chrome.runtime.sendMessage({
     action: "transcriptProgress",
     title: "识别引擎: " + meta.label,
-    subtitle: meta.endpoint,
+    subtitle: endpoint,
   }).catch(() => {});
   if (provider === "bailian") return await transcribeWithBailian(videoId, cid, apiKey);
   if (provider === "minimax") return await transcribeWithMinimax(videoId, cid, apiKey);
+  if (provider === "whisper") {
+    return await transcribeWithLocalWhisper(videoId, cid, settings);
+  }
   throw new Error("ASR provider not yet implemented: " + provider);
 }
 
@@ -837,19 +1069,156 @@ async function transcribeWithBailian(videoId, cid, apiKey) {
 }
 
 /**
- * Fetches the transcript for a Bilibili video using Supadata API.
- *
- * Supadata is a specialized service that reliably extracts transcripts
- * from Bilibili videos. It handles all the complexity of parsing Bilibili's
- * internal data structures, dealing with different caption formats, etc.
- *
- * API Docs: https://docs.supadata.ai
+ * YouTube transcript fetching copied from the mature upstream
+ * zarazhangrui/youtube-digest implementation. It asks Supadata for the
+ * native caption track only, so YouTube never downloads or uploads audio.
+ */
+async function handleFetchYouTubeTranscript(videoId) {
+  try {
+    const settings = await getSettings();
+    if (!settings.supadataApiKey) {
+      return {
+        success: false,
+        error: "NO_SUPADATA_KEY",
+        message: "Supadata API key not configured. Open bilidown Settings.",
+      };
+    }
+
+    const canonicalVideoUrl = YTD_SETTINGS.canonicalYouTubeUrl(videoId);
+    const apiUrl = new URL("https://api.supadata.ai/v1/transcript");
+    apiUrl.searchParams.set("url", canonicalVideoUrl);
+    apiUrl.searchParams.set("text", "false");
+    apiUrl.searchParams.set("lang", "en");
+    apiUrl.searchParams.set("mode", "native");
+
+    const response = await fetch(apiUrl.toString(), {
+      method: "GET",
+      headers: {
+        "x-api-key": settings.supadataApiKey,
+      },
+    });
+
+    if (response.status === 202) {
+      const jobData = await response.json();
+      return await pollTranscriptJob(jobData.jobId, settings.supadataApiKey);
+    }
+
+    if (response.status === 206) {
+      return {
+        success: false,
+        error: "NO_TRANSCRIPT",
+        message: "No native subtitle track is available for this video.",
+      };
+    }
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      if (response.status === 401) {
+        return {
+          success: false,
+          error: "INVALID_SUPADATA_KEY",
+          message: "Your Supadata API key is invalid. Open bilidown Settings.",
+        };
+      }
+      if (response.status === 404) {
+        return {
+          success: false,
+          error: "NO_TRANSCRIPT",
+          message: "No subtitles found for this video.",
+        };
+      }
+      if (response.status === 429) {
+        return {
+          success: false,
+          error: "RATE_LIMITED",
+          message:
+            "Supadata rate limit reached. Please wait a minute and try again.",
+        };
+      }
+      throw new Error(
+        errorData.message || `Supadata API error: ${response.status}`,
+      );
+    }
+
+    const data = await response.json();
+    const transcript = [];
+    let transcriptTextPlain = "";
+    let transcriptTextTimestamped = "";
+
+    if (data.content && Array.isArray(data.content)) {
+      for (const chunk of data.content) {
+        if (chunk.text) {
+          const cleanText = chunk.text.replace(/>> ?/g, "").trim();
+          if (!cleanText) continue;
+
+          const startSeconds = Math.floor((chunk.offset || 0) / 1000);
+          const minutes = Math.floor(startSeconds / 60);
+          const seconds = startSeconds % 60;
+          const timestamp = `${minutes}:${String(seconds).padStart(2, "0")}`;
+
+          transcript.push({
+            text: cleanText,
+            start: startSeconds,
+            duration: Math.floor((chunk.duration || 0) / 1000),
+            language: chunk.lang || data.lang || null,
+          });
+          transcriptTextPlain += cleanText + " ";
+          transcriptTextTimestamped += `[${timestamp}] ${cleanText}\n`;
+        }
+      }
+    }
+
+    if (transcript.length === 0) {
+      return {
+        success: false,
+        error: "EMPTY_TRANSCRIPT",
+        message: "Supadata returned an empty transcript for this video.",
+      };
+    }
+
+    return {
+      success: true,
+      transcript,
+      transcriptText: transcriptTextPlain.trim(),
+      transcriptTextTimestamped: transcriptTextTimestamped.trim(),
+      language: typeof data.lang === "string" ? data.lang : null,
+      source: "youtube-supadata",
+    };
+  } catch (error) {
+    console.error("YouTube transcript fetch error:", error);
+    return {
+      success: false,
+      error: error.message || "Failed to fetch YouTube transcript",
+    };
+  }
+}
+
+/**
+ * Fetches the transcript for a Bilibili video. Native subtitles are read
+ * first; the selected ASR provider is used only when no usable native track
+ * exists. YouTube is handled separately above via Supadata.
  *
  * @param {string} videoId - The Bilibili video ID (e.g., "dQw4w9WgXcQ")
  * @returns {Object} - { success, transcript, transcriptText, language } or { success: false, error }
  */
-async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) {
+async function handleFetchTranscript(
+  videoId,
+  videoUrl = "",
+  requestedPage = 1,
+  platform = "",
+) {
   try {
+    const resolvedPlatform =
+      platform ||
+      YTD_SETTINGS.detectPlatform(videoUrl) ||
+      (/^BV[A-Za-z0-9]{10}$/.test(String(videoId || ""))
+        ? "bilibili"
+        : "youtube");
+
+    if (resolvedPlatform === "youtube") {
+      return await handleFetchYouTubeTranscript(videoId);
+    }
+
     YTD_SETTINGS.canonicalBilibiliUrl(videoId);
     const viewResponse = await fetch(
       `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(videoId)}`,
@@ -867,97 +1236,102 @@ async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) 
     const page = view.data.pages?.[part - 1] || view.data.pages?.[0];
     if (!page?.cid) throw new Error("无法识别当前分 P 的 CID。");
 
-    // When any ASR provider is configured, the transcript source-of-
-    // truth is the audio (Bailian Fun-ASR or minimasr-1.0). Fall back
-    // to B station native subtitles only when the active provider
-    // has no API key set.
     const settings = await getSettings();
-    const activeAsrKey = YTD_SETTINGS.resolveAsrApiKey(settings);
-    if (activeAsrKey) {
+    const hasAsrProvider = YTD_SETTINGS.isAsrProviderConfigured(settings);
+    let nativeFailure = null;
+
+    // Native Bilibili subtitles are always tried first. ASR is a fallback,
+    // not the default source, even when an ASR provider is configured.
+    try {
+      const playerResponse = await fetch(
+        `https://api.bilibili.com/x/player/wbi/v2?bvid=${encodeURIComponent(videoId)}&cid=${encodeURIComponent(page.cid)}`,
+        { credentials: "include", cache: "no-store" },
+      );
+      const player = await playerResponse.json();
+      if (!playerResponse.ok || player.code !== 0) {
+        throw new Error(player.message || "无法读取 B 站字幕列表。");
+      }
+      if (
+        String(player.data?.bvid || "") !== String(videoId) ||
+        Number(player.data?.cid) !== Number(page.cid)
+      ) {
+        throw new Error("B 站返回的字幕信息与当前视频不匹配，请刷新后重试。");
+      }
+
+      const subtitles = player.data?.subtitle?.subtitles || [];
+      const preferred =
+        subtitles.find((item) => /zh|ai-zh/i.test(item.lan || "")) ||
+        subtitles[0];
+      if (!preferred?.subtitle_url) {
+        throw new Error("这个视频没有可用的 B 站原生字幕。");
+      }
+
+      const subtitleUrl = preferred.subtitle_url.startsWith("//")
+        ? `https:${preferred.subtitle_url}`
+        : preferred.subtitle_url;
+      const subtitleResponse = await fetch(subtitleUrl, {
+        credentials: "include",
+      });
+      if (!subtitleResponse.ok) throw new Error("B 站字幕文件下载失败。");
+      const data = await subtitleResponse.json();
+
+      const transcript = [];
+      let transcriptTextPlain = "";
+      let transcriptTextTimestamped = "";
+
+      if (data.body && Array.isArray(data.body)) {
+        for (const chunk of data.body) {
+          if (chunk.content) {
+            const cleanText = chunk.content.trim();
+            if (!cleanText) continue;
+
+            const startSeconds = Math.max(0, Number(chunk.from) || 0);
+            const minutes = Math.floor(startSeconds / 60);
+            const seconds = startSeconds % 60;
+            const timestamp = `${minutes}:${String(seconds).padStart(2, "0")}`;
+
+            transcript.push({
+              text: cleanText,
+              start: startSeconds,
+              duration: Math.max(
+                0,
+                (Number(chunk.to) || startSeconds) - startSeconds,
+              ),
+              language: preferred.lan || null,
+            });
+            transcriptTextPlain += cleanText + " ";
+            transcriptTextTimestamped += `[${timestamp}] ${cleanText}\n`;
+          }
+        }
+      }
+
+      if (transcript.length === 0) {
+        throw new Error("B 站返回了空字幕。");
+      }
+
+      return {
+        success: true,
+        transcript,
+        transcriptText: transcriptTextPlain.trim(),
+        transcriptTextTimestamped: transcriptTextTimestamped.trim(),
+        language: preferred.lan || null,
+        source: "bilibili-subtitle",
+      };
+    } catch (nativeError) {
+      nativeFailure = nativeError;
+      console.warn("[bilidown] Bilibili native subtitle unavailable:", nativeError);
+    }
+
+    if (hasAsrProvider) {
       return await dispatchAsr(videoId, page.cid, settings);
     }
 
-    const playerResponse = await fetch(
-      `https://api.bilibili.com/x/player/wbi/v2?bvid=${encodeURIComponent(videoId)}&cid=${encodeURIComponent(page.cid)}`,
-      { credentials: "include", cache: "no-store" },
-    );
-    const player = await playerResponse.json();
-    if (!playerResponse.ok || player.code !== 0) {
-      throw new Error(player.message || "无法读取 B 站字幕列表。");
-    }
-    if (
-      String(player.data?.bvid || "") !== String(videoId) ||
-      Number(player.data?.cid) !== Number(page.cid)
-    ) {
-      throw new Error("B 站返回的字幕信息与当前视频不匹配，请刷新后重试。");
-    }
-
-    const subtitles = player.data?.subtitle?.subtitles || [];
-    const preferred =
-      subtitles.find((item) => /zh|ai-zh/i.test(item.lan || "")) || subtitles[0];
-    if (!preferred?.subtitle_url) {
-      return {
-        success: false,
-        error: "NO_TRANSCRIPT",
-        message: "这个视频没有可用的 B 站字幕。第一版暂不进行音频转写。",
-      };
-    }
-    const subtitleUrl = preferred.subtitle_url.startsWith("//")
-      ? `https:${preferred.subtitle_url}`
-      : preferred.subtitle_url;
-    const subtitleResponse = await fetch(subtitleUrl, { credentials: "include" });
-    if (!subtitleResponse.ok) throw new Error("B 站字幕文件下载失败。");
-    const data = await subtitleResponse.json();
-
-    // Parse the response into our internal format
-    // Supadata returns: { content: [{ text, offset, duration, lang }], lang, availableLangs }
-    const transcript = [];
-    let transcriptTextPlain = ""; // Plain text for display/export
-    let transcriptTextTimestamped = ""; // Timestamped text for AI analysis
-
-    if (data.body && Array.isArray(data.body)) {
-      for (const chunk of data.body) {
-        if (chunk.content) {
-          const cleanText = chunk.content.trim();
-          if (!cleanText) continue; // Skip if nothing left after cleanup
-
-          const startSeconds = Math.max(0, Number(chunk.from) || 0);
-          const minutes = Math.floor(startSeconds / 60);
-          const seconds = startSeconds % 60;
-          const timestamp = `${minutes}:${String(seconds).padStart(2, "0")}`;
-
-          transcript.push({
-            text: cleanText,
-            start: startSeconds,
-            duration: Math.max(0, (Number(chunk.to) || startSeconds) - startSeconds),
-            language: preferred.lan || null,
-          });
-
-          // Plain text without timestamps (for display/export)
-          transcriptTextPlain += cleanText + " ";
-
-          // Timestamped text for DeepSeek (format: [MM:SS] text)
-          // This allows the model to reference actual transcript positions.
-          transcriptTextTimestamped += `[${timestamp}] ${cleanText}\n`;
-        }
-      }
-    }
-
-    if (transcript.length === 0) {
-      return {
-        success: false,
-        error: "EMPTY_TRANSCRIPT",
-        message: "B 站返回了空字幕。",
-      };
-    }
-
     return {
-      success: true,
-      transcript: transcript,
-      transcriptText: transcriptTextPlain.trim(), // For display
-      transcriptTextTimestamped: transcriptTextTimestamped.trim(), // For AI
-      language: preferred.lan || null,
-      source: "bilibili-subtitle",
+      success: false,
+      error: "NO_TRANSCRIPT",
+      message:
+        nativeFailure?.message ||
+        "这个视频没有可用的 B 站原生字幕，且未配置 ASR。",
     };
   } catch (error) {
     console.error("Transcript fetch error:", error);
@@ -1032,6 +1406,7 @@ async function pollTranscriptJob(jobId, supadataApiKey) {
         transcriptText: transcriptTextPlain.trim(),
         transcriptTextTimestamped: transcriptTextTimestamped.trim(),
         language: typeof data.lang === "string" ? data.lang : null,
+        source: "youtube-supadata",
       };
     }
 
@@ -1407,11 +1782,18 @@ async function handleSaveNote(
   timestamp,
   videoTitle,
   channelName,
+  platform = "",
 ) {
   try {
     const [bvid, partToken] = String(videoId || "").split("@p");
     const part = Math.max(1, Number(partToken) || 1);
-    const canonicalVideoUrl = `${YTD_SETTINGS.canonicalBilibiliUrl(bvid)}${part > 1 ? `?p=${part}` : ""}`;
+    const resolvedPlatform =
+      platform ||
+      (/^BV[A-Za-z0-9]{10}$/.test(bvid) ? "bilibili" : "youtube");
+    const canonicalVideoUrl =
+      resolvedPlatform === "youtube"
+        ? YTD_SETTINGS.canonicalYouTubeUrl(videoId)
+        : `${YTD_SETTINGS.canonicalBilibiliUrl(bvid)}${part > 1 ? `?p=${part}` : ""}`;
     const safeTimestamp = Math.max(0, Math.floor(Number(timestamp) || 0));
 
     // First, try to get the transcript from the bilidown cache. The side panel
@@ -1431,7 +1813,12 @@ async function handleSaveNote(
 
     // If no cached transcript, fetch it
     if (!transcript) {
-      const transcriptResult = await handleFetchTranscript(bvid, canonicalVideoUrl, part);
+      const transcriptResult = await handleFetchTranscript(
+        bvid,
+        canonicalVideoUrl,
+        part,
+        resolvedPlatform,
+      );
       if (!transcriptResult.success) {
         return { success: false, error: "Could not fetch transcript" };
       }
@@ -1557,11 +1944,23 @@ async function handleSaveNote(
  * Unlike handleSaveNote, the text is the raw AI-generated Markdown note —
  * no transcript lookup, no DeepSeek cleanup needed.
  */
-async function handleSaveSummaryNote(videoId, videoTitle, channelName, summaryText) {
+async function handleSaveSummaryNote(
+  videoId,
+  videoTitle,
+  channelName,
+  summaryText,
+  platform = "",
+) {
   try {
     const [bvid, partToken] = String(videoId || "").split("@p");
     const part = Math.max(1, Number(partToken) || 1);
-    const canonicalVideoUrl = `${YTD_SETTINGS.canonicalBilibiliUrl(bvid)}${part > 1 ? `?p=${part}` : ""}`;
+    const resolvedPlatform =
+      platform ||
+      (/^BV[A-Za-z0-9]{10}$/.test(bvid) ? "bilibili" : "youtube");
+    const canonicalVideoUrl =
+      resolvedPlatform === "youtube"
+        ? YTD_SETTINGS.canonicalYouTubeUrl(videoId)
+        : `${YTD_SETTINGS.canonicalBilibiliUrl(bvid)}${part > 1 ? `?p=${part}` : ""}`;
     const text = typeof summaryText === "string" ? summaryText.trim() : "";
 
     if (!text) {

@@ -20,6 +20,12 @@ _metadata/
 node_modules/
 package-lock.json
 
+# Python local Whisper runtime artifacts
+__pycache__/
+*.py[cod]
+.venv/
+local-whisper/models/
+
 # Backup / temp
 *.bak*
 *.tmp

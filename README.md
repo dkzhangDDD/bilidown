@@ -1,9 +1,9 @@
 # bilidown 📺
 
-> **把 B 站长视频，变成可以阅读、跳转、总结和保存的中文学习资料。**
-> 一个适用于 Chrome、Microsoft Edge 及其他 Chromium 浏览器的 B 站视频 AI 总结扩展。
+> **把 B 站和 YouTube 长视频，变成可以阅读、跳转、总结和保存的中文学习资料。**
+> 一个适用于 Chrome、Microsoft Edge 及其他 Chromium 浏览器的视频 AI 总结扩展。
 
-bilidown 会直接显示在哔哩哔哩视频页面中。配置 ASR 服务后，扩展会下载视频音轨交给识别服务生成带时间戳字幕；可选阿里云百炼 Fun-ASR（任意时长）或 minimasr asr-1.0（≤50 MB / ≤500 秒，同步直传）；未配置时回退到 B 站原生字幕。获得文字后，再由你选择的 AI 服务（DeepSeek / MiniMax，或任意 OpenAI 兼容服务）生成中文概览、章节时间线和关键观点。
+bilidown 会直接显示在哔哩哔哩和 YouTube 视频页面中。B 站优先读取原生字幕，只有没有可用字幕时才回退到所选 ASR；YouTube 融合上游 `youtube-digest` 的 Supadata 原生字幕链路，不上传音轨。获得文字后，再由你选择的 AI 服务（DeepSeek / MiniMax，或任意 OpenAI 兼容服务）生成中文概览、章节时间线和关键观点。
 
 它不是简单地把整段字幕丢给 AI，而是围绕 B 站真实使用场景处理了几个关键问题：**视频切换、分 P / 合集识别、时间戳跳转、播放位置跟随、全屏笔记、中文章节和多格式导出。**
 
@@ -52,25 +52,31 @@ BV 号
 
 ---
 
-### 3. 配置 ASR 后默认使用语音识别
+### 3. B 站原生字幕优先，ASR 兜底
 
-当前版本把所选 ASR 服务作为配置后的主要文字来源，设置页可选阿里云百炼 Fun-ASR 或 minimasr asr-1.0：
+点击 AI 总结后，扩展先通过 B 站 `/x/player/wbi/v2` 检测原生字幕。检测到可用字幕后直接使用，不下载、不上传音轨。没有原生字幕时，才会使用设置页中选择的 ASR：
 
 ```text
-在设置中选择 ASR 服务并填写对应 Key
+B 站原生字幕可用
 ↓
-点击 AI 总结后使用所选 ASR 引擎
+直接使用原生字幕
+
+B 站原生字幕不可用
+↓
+使用所选 ASR 引擎
 ```
 
-这样可以绕开 B 站原生字幕偶发返回错误内容、AI 字幕质量不稳定或视频本身没有字幕的问题。
+当视频本身没有可用原生字幕时，ASR 可以继续生成带时间戳文本，避免任务直接中断。
 
-如果没有配置所选 ASR 服务的 Key，扩展才会请求：
+本地 Whisper 支持 OpenAI 兼容的 `/v1/audio/transcriptions`，也可以填写 `whisper.cpp` 的 `/inference` 地址。本机服务不需要 API Key 时，设置页中的 Key 留空即可。由于 B 站音轨是 M4A，使用 `whisper.cpp` 时需要以 `--convert` 启动并安装 ffmpeg。
+
+原生字幕检测和校验会请求：
 
 ```text
 https://api.bilibili.com/x/player/wbi/v2
 ```
 
-读取 B 站原生字幕，并校验接口返回的 `bvid`、`cid` 是否与当前视频一致，避免字幕错配。
+并校验接口返回的 `bvid`、`cid` 是否与当前视频一致，避免字幕错配。
 
 ASR 不会在打开页面时自动预加载。只有点击 AI 总结后才会开始下载和识别，从而减少：
 
@@ -208,6 +214,8 @@ cd bilidown
 | AI 模型 API Key（DeepSeek / MiniMax / 自定义，在设置中选择） | 必需 | 概览、章节、观点、翻译和笔记整理 |
 | 阿里云百炼 API Key | 推荐配置 | 选择「百炼 Fun-ASR」时必需，作为异步识别字幕来源 |
 | minimasr asr-1.0 | 可选 | 选择「minimasr asr-1.0」时复用上方 AI 服务里的 MiniMax Key；≤50 MB / ≤500 秒 |
+| 本地 Whisper | 可选 | 填写本机 HTTP 服务地址和模型名；API Key 可留空；音频不离开本机 |
+| Supadata API Key | 使用 YouTube 时必需 | 通过成熟上游项目的 `mode=native` 链路获取 YouTube 原生字幕，不上传音轨 |
 
 点击扩展的 **设置**，选择 AI 模型并填写对应 API Key 后保存即可。
 
@@ -246,11 +254,11 @@ cd bilidown
       ↓
 用户点击 AI 总结
       ↓
-是否已配置所选 ASR 服务的 Key
-      ↓
-已配置 → 获取低码率音轨 → 所选引擎识别（百炼 / minimasr）
-      ↓
-未配置 → 请求 /x/player/wbi/v2 → 校验 bvid / cid → 读取原生字幕
+B 站是否有可用原生字幕
+↓
+有 → 请求 /x/player/wbi/v2 → 校验 bvid / cid → 读取原生字幕
+↓
+没有 → 获取低码率音轨 → 所选 ASR 引擎识别
                       ↓
                 生成带时间戳文本
                       ↓
@@ -263,7 +271,7 @@ cd bilidown
 
 当前设计坚持：
 
-> **配置 ASR 后默认使用 ASR；未配置时读取 WBI 原生字幕；所有分析结果按视频隔离。**
+> **B 站先读原生字幕，没有时才走 ASR；YouTube 使用 Supadata 原生字幕；所有分析结果按视频隔离。**
 
 ---
 
@@ -271,10 +279,11 @@ cd bilidown
 
 原上游项目主要围绕 YouTube 和 Supadata 工作，但 Supadata 的视频平台支持范围不包含 B 站。
 
-因此本项目内置两种 ASR 引擎，设置页可自由切换：
+因此本项目内置三种 ASR 引擎，设置页可自由切换：
 
 - **阿里云百炼 Fun-ASR**（默认）—— 异步任务，国内账号注册和访问方便，任意时长皆可处理，但需要等待任务调度。
 - **minimasr asr-1.0** —— 同步 multipart 上传，延迟低、无需临时空间；硬限制 ≤50 MB / ≤500 秒，超长视频会被服务器拒绝。
+- **本地 Whisper** —— 将 B 站音轨发送到 `http://localhost` 或 `http://127.0.0.1` 上的 Whisper HTTP 服务，支持 OpenAI 兼容的 `/v1/audio/transcriptions` 和 `whisper.cpp` 的 `/inference`（需 `--convert`），无需云端 API Key。
 
 选择任意一种 ASR 服务都能避免：
 
@@ -282,7 +291,7 @@ cd bilidown
 - AI 字幕质量不稳定
 - 视频本身没有字幕
 
-同时也不要求用户本地安装 Python、模型和运行环境，不需要长期占用本机 CPU / GPU。浏览器扩展只在用户需要时调用。
+百炼与 minimasr 不要求用户本地安装 Python、模型和运行环境；本地 Whisper 需要用户自行启动本地服务，识别速度取决于本机 CPU / GPU。
 
 Fun-ASR / minimasr 是否免费取决于对应服务当前的免费额度和计费规则。本项目不会绕过平台计费，也不承诺永久免费。
 
@@ -304,7 +313,7 @@ DeepSeek 生成概览
 
 因此它一定会比直接读取字幕慢。
 
-minimasr asr-1.0 是同步接口，从上传到返回结果通常 30–90 秒；阿里百炼是异步任务，需要等待任务调度，长视频常常 1–3 分钟。当前版本优先选择低码率音轨，以减少下载、上传和识别等待。视频越长、网络越慢、对应服务越繁忙，耗时越明显。
+minimasr asr-1.0 是同步接口，从上传到返回结果通常 30–90 秒；阿里百炼是异步任务，需要等待任务调度，长视频常常 1–3 分钟；本地 Whisper 没有网络上传，但识别耗时取决于模型大小和本机 CPU / GPU。当前版本优先选择低码率音轨，以减少下载、上传和识别等待。
 
 ---
 
@@ -336,8 +345,8 @@ B站音轨下载失败：HTTP 403
 1. 打开一个公开的 B 站视频。
 2. 点击“转发”右侧的 **AI 总结**。
 3. 在侧边栏确认当前视频标题和 UP 主。
-4. 已配置百炼 API Key 时，等待 Fun-ASR 完成识别。
-5. 未配置百炼 API Key 时，插件尝试读取当前视频的 B 站原生字幕。
+4. 插件先尝试读取当前视频的 B 站原生字幕。
+5. 没有原生字幕时，才等待所选 ASR 完成识别；本地 Whisper 需保持本机服务运行。
 6. 打开 **概览** 查看中文章节和关键观点。
 7. 点击章节或字幕时间戳跳转视频。
 8. 在 **笔记** 中记录内容。
@@ -352,6 +361,8 @@ bilidown/
 ├── manifest.json              # Chrome / Edge 扩展配置
 ├── background.js              # API、ASR、缓存与后台消息
 ├── content.js                 # B 站按钮、播放器和视频切换
+├── youtube-content.js         # YouTube 按钮、播放器和 SPA 切换（上游 youtube-digest）
+├── local-whisper/             # 可选的本机 Whisper HTTP 服务
 ├── settings.js                # 设置读取与兼容逻辑
 ├── sidepanel.html             # 侧边栏页面
 ├── sidepanel.css              # 侧边栏 B 站主题样式
@@ -383,6 +394,7 @@ Side Panel API
 Declarative Net Request
 DeepSeek API
 阿里云百炼 Fun-ASR
+本地 Whisper HTTP
 ```
 
 没有使用 React、Vue 或其他前端框架，扩展加载后可以直接运行。
@@ -408,7 +420,7 @@ npm run package
 输出文件位于：
 
 ```text
-dist/bilidown-v1.2.8.zip
+dist/bilidown-v1.4.0.zip
 ```
 
 
@@ -420,7 +432,7 @@ dist/bilidown-v1.2.8.zip
 
 - 主要适配普通 B 站视频页，番剧、直播、课堂等页面结构可能不同。
 - 私密、付费、地区受限或需要额外权限的视频可能无法读取字幕或音轨。
-- 配置百炼 API Key 后会默认走 ASR，需要等待音频下载、上传和识别。
+- 只有没有 B 站原生字幕时才会走 ASR，需要等待音频下载和识别；云端引擎还需要上传。
 - ASR、DeepSeek 的免费额度、价格和可用性由对应平台决定。
 - B 站修改网页结构或内部接口后，扩展可能需要更新。
 - 其他 Chromium 浏览器即使版本符合，也可能缺少 Side Panel API。
@@ -437,7 +449,7 @@ dist/bilidown-v1.2.8.zip
 - 不收集用户的视频观看记录
 - API Key 保存在浏览器本地扩展存储
 - 字幕分析时会将文本发送给配置的 AI 服务
-- ASR 时会将视频音轨发送给阿里云百炼相关服务
+- ASR 时会将视频音轨发送给所选服务；选择本地 Whisper 时仅发送到 `localhost` 或 `127.0.0.1`
 
 详细说明见 `PRIVACY.md` 和 `SECURITY.md`。
 
@@ -456,6 +468,7 @@ dist/bilidown-v1.2.8.zip
 主要改造包括：
 
 - 从 YouTube 页面适配为哔哩哔哩视频页面
+- 保留并融合上游 YouTube 原生字幕与页面适配实现，形成 B 站 / YouTube 双平台版本
 - 从 YouTube 视频识别改为 BV / 分 P / 合集识别
 - 重新实现 B 站操作栏按钮和播放器交互
 - 使用 B 站主题的中文侧边栏和设置页
@@ -463,7 +476,7 @@ dist/bilidown-v1.2.8.zip
 - 原生字幕接口改为 `/x/player/wbi/v2`，并校验返回的 `bvid` 与 `cid`
 - 增加视频状态隔离，避免切换视频后内容错乱
 - 增加中文章节、全屏笔记和多格式导出
-- 移除对 YouTube 和 Supadata 的运行依赖
+- YouTube 使用 Supadata 原生字幕；B 站保留本地 ASR 与原生字幕双路径
 
 感谢原作者公开项目和核心产品思路。
 
@@ -492,7 +505,7 @@ bilidown 不想只做一个“把字幕复制出来”的工具。
 能导出
 ```
 
-配置百炼 API Key 后，以 Fun-ASR 结果作为主要文字来源；没有配置时，再使用经过视频身份校验的 B 站原生字幕。
+优先使用经过视频身份校验的 B 站原生字幕；没有可用字幕时，再使用所选 ASR 引擎。
 
 > **不自动消耗额度，不混淆不同视频，也不让中文用户拿到一套莫名其妙的英文章节。**
 

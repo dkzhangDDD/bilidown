@@ -16,8 +16,8 @@ var YTD_SETTINGS = (() => {
   // ASR (speech-to-text) providers live in their own registry so chat and
   // speech-to-text choices can evolve independently. Bailian fun-asr uses
   // DashScope OSS-backed async tasks; minimasr-1.0 uses a synchronous
-  // multipart POST. Both implementations live in background.js and are
-  // selected via dispatchAsr().
+  // multipart POST; local Whisper targets a user-run HTTP server. All
+  // implementations live in background.js and are selected via dispatchAsr().
   const DEFAULT_ASR_PROVIDER = "bailian";
   const ASR_PROVIDERS = Object.freeze({
     bailian: {
@@ -37,6 +37,15 @@ var YTD_SETTINGS = (() => {
       maxSeconds: 500,
       // Reuse minimaxApiKey so users do not paste the same key twice.
       keyField: "minimaxApiKey",
+    },
+    whisper: {
+      label: "Local Whisper",
+      endpoint: "http://127.0.0.1:9000/v1/audio/transcriptions",
+      model: "large-v3-turbo",
+      maxBytes: Infinity,
+      maxSeconds: Infinity,
+      keyField: "whisperApiKey",
+      keyOptional: true,
     },
   });
   const AI_PROVIDERS = Object.freeze({
@@ -68,6 +77,9 @@ var YTD_SETTINGS = (() => {
     customModel: "",
     asrProvider: DEFAULT_ASR_PROVIDER,
     asrApiKey: "",
+    whisperEndpoint: ASR_PROVIDERS.whisper.endpoint,
+    whisperModel: ASR_PROVIDERS.whisper.model,
+    whisperApiKey: "",
     supadataApiKey: "",
   });
 
@@ -115,6 +127,12 @@ var YTD_SETTINGS = (() => {
       ? DEFAULT_PROVIDER
       : normalizeProvider(input);
     const isCustom = provider === "custom";
+    const legacyWhisperEndpoint =
+      "http://127.0.0.1:8000/v1/audio/transcriptions";
+    const whisperEndpoint =
+      input.whisperEndpoint === undefined
+        ? DEFAULTS.whisperEndpoint
+        : trimString(input.whisperEndpoint);
     return {
       provider,
       aiApiKey: legacyCustom ? "" : trimString(input.aiApiKey),
@@ -130,7 +148,16 @@ var YTD_SETTINGS = (() => {
       customModel: trimString(input.customModel),
       asrProvider: normalizeAsrProvider(input),
       asrApiKey: trimString(input.asrApiKey),
-      supadataApiKey: "",
+      whisperEndpoint:
+        whisperEndpoint === legacyWhisperEndpoint
+          ? DEFAULTS.whisperEndpoint
+          : whisperEndpoint,
+      whisperModel:
+        input.whisperModel === undefined
+          ? DEFAULTS.whisperModel
+          : trimString(input.whisperModel),
+      whisperApiKey: trimString(input.whisperApiKey),
+      supadataApiKey: trimString(input.supadataApiKey),
     };
   }
 
@@ -170,12 +197,88 @@ var YTD_SETTINGS = (() => {
     return trimString(settings[meta.keyField]);
   }
 
+  function resolveAsrEndpoint(settings = {}) {
+    const provider = settings.asrProvider || DEFAULT_ASR_PROVIDER;
+    const meta = ASR_PROVIDERS[provider];
+    if (!meta) return "";
+    if (provider === "whisper") {
+      return trimString(settings.whisperEndpoint) || meta.endpoint;
+    }
+    return meta.endpoint;
+  }
+
+  function resolveAsrModel(settings = {}) {
+    const provider = settings.asrProvider || DEFAULT_ASR_PROVIDER;
+    const meta = ASR_PROVIDERS[provider];
+    if (!meta) return "";
+    if (provider === "whisper") {
+      return trimString(settings.whisperModel) || meta.model;
+    }
+    return meta.model;
+  }
+
+  function isValidWhisperEndpoint(value) {
+    try {
+      const url = new URL(trimString(value));
+      return (
+        url.protocol === "http:" &&
+        (url.hostname === "localhost" || url.hostname === "127.0.0.1")
+      );
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  function isAsrProviderConfigured(settings = {}) {
+    const provider = settings.asrProvider || DEFAULT_ASR_PROVIDER;
+    const meta = ASR_PROVIDERS[provider];
+    if (!meta) return false;
+    if (meta.keyOptional) {
+      return !!resolveAsrEndpoint(settings);
+    }
+    return !!resolveAsrApiKey(settings);
+  }
+
   function canonicalBilibiliUrl(videoId) {
     const normalized = String(videoId || "").trim();
     if (!/^BV[A-Za-z0-9]{10}$/.test(normalized)) {
       throw new Error("Invalid Bilibili BV ID.");
     }
     return `https://www.bilibili.com/video/${normalized}`;
+  }
+
+  function canonicalYouTubeUrl(videoId) {
+    const normalized = String(videoId || "").trim();
+    if (!/^[A-Za-z0-9_-]{6,20}$/.test(normalized)) {
+      throw new Error("Invalid YouTube video ID.");
+    }
+    return `https://www.youtube.com/watch?v=${normalized}`;
+  }
+
+  function detectPlatform(url) {
+    try {
+      const parsed = new URL(String(url || ""));
+      if (
+        parsed.hostname.endsWith("bilibili.com") &&
+        /^\/video\/BV[A-Za-z0-9]{10}/i.test(parsed.pathname)
+      ) {
+        return "bilibili";
+      }
+      if (
+        parsed.hostname === "youtu.be" ||
+        parsed.hostname === "youtube.com" ||
+        parsed.hostname.endsWith(".youtube.com")
+      ) {
+        return "youtube";
+      }
+      return null;
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function isSupportedVideoUrl(url) {
+    return detectPlatform(url) !== null;
   }
 
   return {
@@ -193,7 +296,14 @@ var YTD_SETTINGS = (() => {
     chatCompletionsUrl,
     resolveAiApiKey,
     resolveAsrApiKey,
+    resolveAsrEndpoint,
+    resolveAsrModel,
+    isValidWhisperEndpoint,
+    isAsrProviderConfigured,
     canonicalBilibiliUrl,
+    canonicalYouTubeUrl,
+    detectPlatform,
+    isSupportedVideoUrl,
   };
 })();
 

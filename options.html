@@ -37,22 +37,24 @@
         </div>
         <h1 data-i18n="heading">bilidown 设置</h1>
         <p class="lede" data-i18n="lede">
-          密钥保存在当前 Chrome 配置中，只在使用 AI 功能时发送给 DeepSeek。
-          本扩展没有开发者服务器或数据分析。
+          密钥保存在当前 Chrome 配置中。音频只会发送给你选择的语音识别服务，
+          YouTube 字幕请求会发送给 Supadata，字幕和视频上下文会发送给你选择的 AI
+          服务。本扩展没有开发者服务器或数据分析。
         </p>
       </header>
 
       <form id="settingsForm">
         <section class="card">
-          <h2 data-i18n="asrService">语音识别服务</h2>
+          <h2 data-i18n="asrService">B站识别</h2>
           <p class="help" data-i18n="asrServiceIntro">
-            配置识别服务后，bilinote 会优先使用识别后的字幕；未配置时回退到 B 站原生字幕。
+            bilidown 会先检查 B 站原生字幕；只有没有可用字幕时，才使用所选的语音识别服务。
           </p>
 
           <label for="asrProviderSelect" data-i18n="asrProviderLabel">识别引擎</label>
           <select id="asrProviderSelect" name="asrProviderSelect">
             <option value="bailian" data-i18n="asrProviderBailian">阿里云百炼 Fun-ASR</option>
             <option value="minimax" data-i18n="asrProviderMinimax">minimasr asr-1.0</option>
+            <option value="whisper" data-i18n="asrProviderWhisper">本地 Whisper</option>
           </select>
 
           <div id="bailianAsrGroup">
@@ -90,6 +92,80 @@
               复用上方「AI 服务」中填写的 MiniMax Key，无需在此重复填写。
             </p>
           </div>
+
+          <div id="whisperAsrGroup" style="display: none">
+            <label for="whisperEndpoint" data-i18n="whisperEndpointLabel"
+              >本机服务地址</label
+            >
+            <input
+              id="whisperEndpoint"
+              name="whisperEndpoint"
+              type="url"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="http://127.0.0.1:9000/v1/audio/transcriptions"
+            />
+            <label for="whisperModel" data-i18n="whisperModelLabel"
+              >模型名称</label
+            >
+            <input
+              id="whisperModel"
+              name="whisperModel"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="large-v3-turbo"
+            />
+            <label for="whisperApiKey" data-i18n="whisperApiKeyLabel"
+              >API Key（可选）</label
+            >
+            <input
+              id="whisperApiKey"
+              name="whisperApiKey"
+              type="password"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="仅本机服务要求鉴权时填写"
+            />
+            <p class="help" data-i18n="whisperAsrHelp">
+              支持 OpenAI 兼容的 /v1/audio/transcriptions，也可直接填写
+              whisper.cpp 的 /inference 地址。扩展会把 B 站音轨发送到该本机服务并读取分段结果。
+              B 站音轨是 M4A，whisper.cpp 需启用 --convert 并安装 ffmpeg。
+            </p>
+            <p class="privacy-note" data-i18n="whisperPrivacyNote">
+              地址必须使用 http://localhost 或 http://127.0.0.1。音频只发送到本机端口，
+              不会经过开发者服务器。
+            </p>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2 data-i18n="transcriptProvider">YouTube识别</h2>
+          <label for="supadataApiKey" data-i18n="supadataApiKeyLabel"
+            >Supadata API 密钥</label
+          >
+          <input
+            id="supadataApiKey"
+            name="supadataApiKey"
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Paste your Supadata key"
+          />
+          <p class="help">
+            <span data-i18n="supadataHelp"
+              >用于获取带时间戳的 YouTube 原生字幕。</span
+            >
+            <a
+              href="https://dash.supadata.ai/auth/sign-up"
+              target="_blank"
+              rel="noreferrer"
+              data-i18n="supadataLink"
+              >创建 Supadata 账号并获取密钥</a
+            ><span data-i18n="supadataHelpSuffix"
+              >。Supadata 会在引导流程中生成密钥。</span
+            >
+          </p>
         </section>
 
         <section class="card">
