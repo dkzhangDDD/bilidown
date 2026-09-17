@@ -1068,6 +1068,100 @@ async function transcribeWithBailian(videoId, cid, apiKey) {
   return normalizeBailianTranscript(await pollBailianAsrTask(taskId, apiKey));
 }
 
+function normalizeSubtitleText(text) {
+  return String(text || "")
+    .replace(/\s+/g, " ")
+    .replace(/([\u3400-\u9fff])\s+([\u3400-\u9fff])/g, "$1$2")
+    .replace(/\s+([，。；：！？、])/g, "$1")
+    .trim();
+}
+
+function restoreSubtitlePunctuation(entries, language = "zh") {
+  if (!Array.isArray(entries) || entries.length === 0) return [];
+
+  const isChinese =
+    /^zh/i.test(String(language || "")) ||
+    entries.some((entry) => /[\u3400-\u9fff]/.test(String(entry?.text || "")));
+  const terminalPunctuation = isChinese ? "。！？!?…" : ".!?…";
+  const softPunctuation = isChinese ? "，,；;：:" : ",;:";
+  const period = isChinese ? "。" : ".";
+  const comma = isChinese ? "，" : ",";
+  const question = isChinese ? "？" : "?";
+  const questionMarkers = isChinese
+    ? ["吗", "呢", "么", "什么", "为什么", "怎么", "是否", "哪", "谁", "多少", "几"]
+    : ["what", "why", "how", "when", "where", "who", "which", "?"];
+  const restored = [];
+  let current = null;
+
+  const flush = (reason, gap = 0) => {
+    if (!current) return;
+    let text = normalizeSubtitleText(current.text);
+    const lastChar = text.slice(-1);
+    if (
+      text &&
+      !terminalPunctuation.includes(lastChar) &&
+      !softPunctuation.includes(lastChar)
+    ) {
+      if (reason === "pause" && gap >= 0.9) {
+        text += period;
+      } else if (
+        reason === "final" &&
+        questionMarkers.some((marker) =>
+          text.toLowerCase().includes(String(marker).toLowerCase()),
+        )
+      ) {
+        text += question;
+      } else if (reason === "final") {
+        text += period;
+      } else {
+        text += comma;
+      }
+    }
+    if (text) {
+      restored.push({
+        text,
+        start: current.start,
+        duration: Math.max(0, current.end - current.start),
+        language: current.language,
+      });
+    }
+    current = null;
+  };
+
+  entries.forEach((entry) => {
+    const text = normalizeSubtitleText(entry?.text);
+    if (!text) return;
+    const start = Math.max(0, Number(entry?.start) || 0);
+    const duration = Math.max(0, Number(entry?.duration) || 0);
+    const end = start + duration;
+    const gap = current ? Math.max(0, start - current.end) : 0;
+
+    if (current && gap >= 0.65) {
+      flush("pause", gap);
+    }
+
+    if (!current) {
+      current = {
+        text,
+        start,
+        end,
+        language: entry?.language || language || null,
+      };
+    } else {
+      const separator = /[\u3400-\u9fff]$/.test(current.text) ? "" : " ";
+      current.text = normalizeSubtitleText(`${current.text}${separator}${text}`);
+      current.end = Math.max(current.end, end);
+    }
+
+    if (current.text.length >= 70 || current.end - current.start >= 8) {
+      flush("length");
+    }
+  });
+
+  flush("final");
+  return restored.length ? restored : entries;
+}
+
 /**
  * YouTube transcript fetching copied from the mature upstream
  * zarazhangrui/youtube-digest implementation. It asks Supadata for the
@@ -1176,11 +1270,30 @@ async function handleFetchYouTubeTranscript(videoId) {
       };
     }
 
+    const restoredTranscript = restoreSubtitlePunctuation(
+      transcript,
+      typeof data.lang === "string" ? data.lang : "zh",
+    );
+    const restoredPlain = restoredTranscript
+      .map((entry) => entry.text)
+      .join(" ")
+      .trim();
+    const restoredTimestamped = restoredTranscript
+      .map((entry) => {
+        const startSeconds = Math.max(0, Number(entry.start) || 0);
+        const minutes = Math.floor(startSeconds / 60);
+        const seconds = Math.floor(startSeconds % 60);
+        return `[${minutes}:${String(seconds).padStart(2, "0")}] ${entry.text}`;
+      })
+      .join("\n")
+      .trim();
+
     return {
       success: true,
-      transcript,
-      transcriptText: transcriptTextPlain.trim(),
-      transcriptTextTimestamped: transcriptTextTimestamped.trim(),
+      transcript: restoredTranscript,
+      transcriptText: restoredPlain || transcriptTextPlain.trim(),
+      transcriptTextTimestamped:
+        restoredTimestamped || transcriptTextTimestamped.trim(),
       language: typeof data.lang === "string" ? data.lang : null,
       source: "youtube-supadata",
     };
@@ -1309,11 +1422,30 @@ async function handleFetchTranscript(
         throw new Error("B 站返回了空字幕。");
       }
 
+      const restoredTranscript = restoreSubtitlePunctuation(
+        transcript,
+        preferred.lan || "zh",
+      );
+      const restoredPlain = restoredTranscript
+        .map((entry) => entry.text)
+        .join(" ")
+        .trim();
+      const restoredTimestamped = restoredTranscript
+        .map((entry) => {
+          const startSeconds = Math.max(0, Number(entry.start) || 0);
+          const minutes = Math.floor(startSeconds / 60);
+          const seconds = Math.floor(startSeconds % 60);
+          return `[${minutes}:${String(seconds).padStart(2, "0")}] ${entry.text}`;
+        })
+        .join("\n")
+        .trim();
+
       return {
         success: true,
-        transcript,
-        transcriptText: transcriptTextPlain.trim(),
-        transcriptTextTimestamped: transcriptTextTimestamped.trim(),
+        transcript: restoredTranscript,
+        transcriptText: restoredPlain || transcriptTextPlain.trim(),
+        transcriptTextTimestamped:
+          restoredTimestamped || transcriptTextTimestamped.trim(),
         language: preferred.lan || null,
         source: "bilibili-subtitle",
       };
@@ -1400,11 +1532,30 @@ async function pollTranscriptJob(jobId, supadataApiKey) {
         }
       }
 
+      const restoredTranscript = restoreSubtitlePunctuation(
+        transcript,
+        typeof data.lang === "string" ? data.lang : "zh",
+      );
+      const restoredPlain = restoredTranscript
+        .map((entry) => entry.text)
+        .join(" ")
+        .trim();
+      const restoredTimestamped = restoredTranscript
+        .map((entry) => {
+          const startSeconds = Math.max(0, Number(entry.start) || 0);
+          const minutes = Math.floor(startSeconds / 60);
+          const seconds = Math.floor(startSeconds % 60);
+          return `[${minutes}:${String(seconds).padStart(2, "0")}] ${entry.text}`;
+        })
+        .join("\n")
+        .trim();
+
       return {
         success: true,
-        transcript: transcript,
-        transcriptText: transcriptTextPlain.trim(),
-        transcriptTextTimestamped: transcriptTextTimestamped.trim(),
+        transcript: restoredTranscript,
+        transcriptText: restoredPlain || transcriptTextPlain.trim(),
+        transcriptTextTimestamped:
+          restoredTimestamped || transcriptTextTimestamped.trim(),
         language: typeof data.lang === "string" ? data.lang : null,
         source: "youtube-supadata",
       };

@@ -78,6 +78,8 @@ https://api.bilibili.com/x/player/wbi/v2
 
 并校验接口返回的 `bvid`、`cid` 是否与当前视频一致，避免字幕错配。
 
+B 站原生字幕通常按短句返回且不带标点。bilidown 会根据字幕时间戳中的停顿和时长恢复中文逗号、句号与问号，再交给侧边栏显示。
+
 ASR 不会在打开页面时自动预加载。只有点击 AI 总结后才会开始下载和识别，从而减少：
 
 - 不必要的流量消耗
@@ -420,7 +422,7 @@ npm run package
 输出文件位于：
 
 ```text
-dist/bilidown-v1.4.0.zip
+dist/bilidown-v1.4.1.zip
 ```
 
 

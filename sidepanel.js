@@ -15,7 +15,7 @@ const debugLog = (...args) => {
 // ============================================================
 
 let currentVideoId = null;
-const BILIDOWN_CACHE_SCHEMA_VERSION = 8;
+const BILIDOWN_CACHE_SCHEMA_VERSION = 9;
 let generation = 0;
 let currentVideoUrl = null;
 let currentAnalysis = null;

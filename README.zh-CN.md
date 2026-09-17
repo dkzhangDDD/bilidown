@@ -7,6 +7,7 @@
 - 支持 `www.bilibili.com/video/BV...` 普通视频页
 - 支持 YouTube `watch`、`shorts`、`live` 和 `youtu.be` 页面
 - B 站优先读取原生字幕；没有可用字幕时，再回退到阿里云百炼 Fun-ASR、minimasr asr-1.0 或本地 Whisper
+- B 站原生字幕会按时间停顿和字幕时长恢复中文标点，避免字幕列表显示成无标点长句
 - YouTube 使用 Supadata `mode=native` 获取原生字幕，不经过 ASR
 - 本地 Whisper 支持 OpenAI 兼容的 `/v1/audio/transcriptions` 和 `whisper.cpp` 的 `/inference`，可填写 `http://localhost` 或 `http://127.0.0.1` 地址，API Key 可留空；B 站音轨是 M4A，`whisper.cpp` 需启用 `--convert`
 - 支持多 P 视频，自动识别当前分 P
@@ -50,7 +51,7 @@ npm run check
 npm run package
 ```
 
-打包结果位于 `dist/bilidown-v1.4.0.zip`。
+打包结果位于 `dist/bilidown-v1.4.1.zip`。
 
 ## 许可证
 
