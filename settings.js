@@ -13,6 +13,32 @@ var YTD_SETTINGS = (() => {
    * `custom` keeps the user-entered base URL / model instead.
    * Add future models here as new entries (plus options UI options).
    */
+  // ASR (speech-to-text) providers live in their own registry so chat and
+  // speech-to-text choices can evolve independently. Bailian fun-asr uses
+  // DashScope OSS-backed async tasks; minimasr-1.0 uses a synchronous
+  // multipart POST. Both implementations live in background.js and are
+  // selected via dispatchAsr().
+  const DEFAULT_ASR_PROVIDER = "bailian";
+  const ASR_PROVIDERS = Object.freeze({
+    bailian: {
+      label: "Aliyun Bailian (Fun-ASR)",
+      endpoint: "https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription",
+      model: "fun-asr",
+      maxBytes: Infinity,
+      maxSeconds: Infinity,
+      keyField: "asrApiKey",
+    },
+    minimax: {
+      label: "minimasr (asr-1.0)",
+      endpoint: "https://api.minimaxi.com/v1/speech_to_text",
+      model: "asr-1.0",
+      // Hard limits from minimasr docs: 50 MB per request, 500 s.
+      maxBytes: 50 * 1024 * 1024,
+      maxSeconds: 500,
+      // Reuse minimaxApiKey so users do not paste the same key twice.
+      keyField: "minimaxApiKey",
+    },
+  });
   const AI_PROVIDERS = Object.freeze({
     deepseek: {
       label: "DeepSeek",
@@ -40,12 +66,16 @@ var YTD_SETTINGS = (() => {
     aiModel: AI_PROVIDERS[DEFAULT_PROVIDER].model,
     customBaseUrl: "",
     customModel: "",
+    asrProvider: DEFAULT_ASR_PROVIDER,
     asrApiKey: "",
     supadataApiKey: "",
   });
 
   function isKnownProvider(value) {
     return Object.prototype.hasOwnProperty.call(AI_PROVIDERS, value);
+  }
+  function isKnownAsrProvider(value) {
+    return Object.prototype.hasOwnProperty.call(ASR_PROVIDERS, value);
   }
 
   /**
@@ -63,6 +93,16 @@ var YTD_SETTINGS = (() => {
 
   function normalizeProvider(input) {
     return isKnownProvider(input.provider) ? input.provider : DEFAULT_PROVIDER;
+  }
+  function normalizeAsrProvider(input) {
+    // Pre-1.2 settings only had asrApiKey without asrProvider.
+    // If a key is present and the provider is unset, default to
+    // Bailian - this is the only provider that ever populated it.
+    if (input && isKnownAsrProvider(input.asrProvider)) return input.asrProvider;
+    if (input && typeof input.asrApiKey === "string" && input.asrApiKey.trim()) {
+      return "bailian";
+    }
+    return DEFAULT_ASR_PROVIDER;
   }
 
   function trimString(value) {
@@ -88,6 +128,7 @@ var YTD_SETTINGS = (() => {
         : AI_PROVIDERS[provider].model,
       customBaseUrl: trimString(input.customBaseUrl),
       customModel: trimString(input.customModel),
+      asrProvider: normalizeAsrProvider(input),
       asrApiKey: trimString(input.asrApiKey),
       supadataApiKey: "",
     };
@@ -115,6 +156,19 @@ var YTD_SETTINGS = (() => {
     if (provider === "custom") return settings.customApiKey || "";
     return settings.aiApiKey || "";
   }
+  /**
+   * Resolve the active API key for the current ASR provider.
+   * Each ASR provider reuses a known field; bailian -> asrApiKey,
+   * minimax -> minimaxApiKey (same field as the chat provider).
+   * Returns "" for unknown providers so the dispatcher can detect
+   * "no key configured".
+   */
+  function resolveAsrApiKey(settings = {}) {
+    const provider = settings.asrProvider || DEFAULT_ASR_PROVIDER;
+    const meta = ASR_PROVIDERS[provider];
+    if (!meta) return "";
+    return trimString(settings[meta.keyField]);
+  }
 
   function canonicalBilibiliUrl(videoId) {
     const normalized = String(videoId || "").trim();
@@ -128,6 +182,9 @@ var YTD_SETTINGS = (() => {
     STORAGE_KEY,
     DEFAULTS,
     AI_PROVIDERS,
+    ASR_PROVIDERS,
+    DEFAULT_ASR_PROVIDER,
+    isKnownAsrProvider,
     DEFAULT_PROVIDER,
     isKnownProvider,
     isLegacyCustom,
@@ -135,6 +192,7 @@ var YTD_SETTINGS = (() => {
     migrateLegacyCustom,
     chatCompletionsUrl,
     resolveAiApiKey,
+    resolveAsrApiKey,
     canonicalBilibiliUrl,
   };
 })();

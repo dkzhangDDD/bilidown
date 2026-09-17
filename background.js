@@ -683,6 +683,137 @@ function normalizeBailianTranscript(data) {
   };
 }
 
+// ---------------------------------------------------------------
+// MiniMax M3 speech-to-text (asr-1.0). Synchronous multipart POST
+// against https://api.minimaxi.com/v1/speech_to_text. Returns the
+// same shape as normalizeBailianTranscript() so the rest of the
+// pipeline (and the sidepanel UI) does not care which provider ran.
+//
+// Hard limit pre-flight: 50 MB per request. Long B station videos
+// at qn=16 typically run 60-120 MB / >30 min, so we fail fast with
+// a clear message instead of letting the server return 413.
+// ---------------------------------------------------------------
+
+async function transcribeWithMinimax(videoId, cid, apiKey) {
+  const meta = YTD_SETTINGS.ASR_PROVIDERS.minimax;
+  chrome.runtime.sendMessage({
+    action: "transcriptProgress",
+    title: "正在下载B站音轨",
+    subtitle: "MiniMax ASR 直传，请保持视频页面打开",
+  }).catch(() => {});
+  const blob = await fetchBilibiliAudioBlob(videoId, cid);
+  if (blob.size > meta.maxBytes) {
+    const mb = (blob.size / 1024 / 1024).toFixed(1);
+    const limitMb = (meta.maxBytes / 1024 / 1024).toFixed(0);
+    throw new Error(
+      "Audio " + mb + " MB exceeds MiniMax ASR per-call limit of " +
+      limitMb + " MB. Switch to Aliyun Bailian ASR in Settings."
+    );
+  }
+  chrome.runtime.sendMessage({
+    action: "transcriptProgress",
+    title: "正在上传音轨",
+    subtitle: "MiniMax asr-1.0（" + (blob.size / 1024 / 1024).toFixed(1) + " MB）",
+  }).catch(() => {});
+  const form = new FormData();
+  form.append("model", meta.model);
+  form.append("response_format", "verbose_json");
+  form.append("timestamp_level", "sentence");
+  form.append("file", blob, videoId + ".m4a");
+  const response = await fetch(meta.endpoint, {
+    method: "POST",
+    headers: { Authorization: "Bearer " + apiKey },
+    body: form,
+  });
+  const text = await response.text();
+  let payload;
+  try { payload = JSON.parse(text); } catch (_e) {
+    throw new Error("MiniMax ASR returned non-JSON (HTTP " + response.status + ").");
+  }
+  if (!response.ok) {
+    const msg = (payload && (payload.message || (payload.error && payload.error.message))) || text.slice(0, 200);
+    // Translate MiniMax's hard duration limit into a message that points
+    // the user at a workable next step (switch provider, not retry).
+    if (response.status === 400 && /duration.*exceeds.*limit/i.test(msg)) {
+      throw new Error(
+        "Video too long for MiniMax ASR (limit 500 s). " +
+        "Switch the ASR provider to Aliyun Bailian Fun-ASR in Settings, " +
+        "or use a video shorter than ~8 minutes."
+      );
+    }
+    throw new Error("MiniMax ASR failed (HTTP " + response.status + "): " + msg);
+  }
+  if (typeof payload.duration === "number" && payload.duration > meta.maxSeconds) {
+    console.warn("[bilinote] MiniMax ASR ran on " + payload.duration + "s audio (> " + meta.maxSeconds + "s limit).");
+  }
+  chrome.runtime.sendMessage({
+    action: "transcriptProgress",
+    title: "正在解析字幕",
+    subtitle: "MiniMax verbose_json",
+  }).catch(() => {});
+  return normalizeMinimaxTranscript(payload);
+}
+
+function normalizeMinimaxTranscript(payload) {
+  const segments = Array.isArray(payload.segments) ? payload.segments : [];
+  const transcript = segments.length
+    ? segments
+        .map((segment) => ({
+            text: String(segment.text || "").trim(),
+            start: Math.max(0, Number(segment.start) || 0),
+            duration: Math.max(0, (Number(segment.end) || 0) - (Number(segment.start) || 0)),
+            language: (segment.speaker != null ? "spk" + segment.speaker : "zh"),
+          }))
+        .filter((sentence) => sentence.text)
+    : [{ text: String(payload.text || "").trim(), start: 0, duration: 0, language: "zh" }]
+        .filter((s) => s.text);
+  if (!transcript.length) throw new Error("MiniMax ASR returned an empty transcript.");
+  let plain = "";
+  let timestamped = "";
+  for (const sentence of transcript) {
+    const minutes = Math.floor(sentence.start / 60);
+    const seconds = Math.floor(sentence.start % 60);
+    plain += sentence.text + " ";
+    timestamped += "[" + minutes + ":" + String(seconds).padStart(2, "0") + "] " + sentence.text + "\n";
+  }
+  return {
+    success: true,
+    transcript,
+    transcriptText: plain.trim(),
+    transcriptTextTimestamped: timestamped.trim(),
+    language: "zh",
+    source: "minimax-asr-1.0",
+  };
+}
+
+// ---------------------------------------------------------------
+// ASR dispatcher: routes to the provider selected in settings.
+// Falls back to B station native subtitles only when no ASR
+// provider key is configured.
+// ---------------------------------------------------------------
+
+async function dispatchAsr(videoId, cid, settings) {
+  const provider = settings.asrProvider || YTD_SETTINGS.DEFAULT_ASR_PROVIDER;
+  const meta = YTD_SETTINGS.ASR_PROVIDERS[provider];
+  if (!meta) throw new Error("Unknown ASR provider: " + provider);
+  const apiKey = YTD_SETTINGS.resolveAsrApiKey(settings);
+  if (!apiKey) {
+    throw new Error("Provider " + meta.label + " selected but no API key configured. Fill it in Settings.");
+  }
+  // Surface the route choice in both the console and the sidepanel progress
+  // text so a user can verify at a glance which provider was actually used.
+  console.log("[bilinote] ASR dispatch: provider=" + provider + " endpoint=" + meta.endpoint + " keyLen=" + apiKey.length);
+  chrome.runtime.sendMessage({
+    action: "transcriptProgress",
+    title: "识别引擎: " + meta.label,
+    subtitle: meta.endpoint,
+  }).catch(() => {});
+  if (provider === "bailian") return await transcribeWithBailian(videoId, cid, apiKey);
+  if (provider === "minimax") return await transcribeWithMinimax(videoId, cid, apiKey);
+  throw new Error("ASR provider not yet implemented: " + provider);
+}
+
+
 async function transcribeWithBailian(videoId, cid, apiKey) {
   chrome.runtime.sendMessage({ action: "transcriptProgress", title: "正在下载B站音轨", subtitle: "请保持视频页面打开" }).catch(() => {});
   const blob = await fetchBilibiliAudioBlob(videoId, cid);
@@ -736,11 +867,14 @@ async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) 
     const page = view.data.pages?.[part - 1] || view.data.pages?.[0];
     if (!page?.cid) throw new Error("无法识别当前分 P 的 CID。");
 
-    // When configured, ASR is the source of truth. This avoids incorrect
-    // Bilibili ai-zh tracks and also covers videos without subtitle tracks.
+    // When any ASR provider is configured, the transcript source-of-
+    // truth is the audio (Bailian Fun-ASR or minimasr-1.0). Fall back
+    // to B station native subtitles only when the active provider
+    // has no API key set.
     const settings = await getSettings();
-    if (settings.asrApiKey) {
-      return await transcribeWithBailian(videoId, page.cid, settings.asrApiKey);
+    const activeAsrKey = YTD_SETTINGS.resolveAsrApiKey(settings);
+    if (activeAsrKey) {
+      return await dispatchAsr(videoId, page.cid, settings);
     }
 
     const playerResponse = await fetch(

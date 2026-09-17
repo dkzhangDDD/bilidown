@@ -44,24 +44,52 @@
 
       <form id="settingsForm">
         <section class="card">
-          <h2>语音识别（阿里云百炼）</h2>
-          <label for="asrApiKey">百炼 API Key</label>
-          <input
-            id="asrApiKey"
-            name="asrApiKey"
-            type="password"
-            autocomplete="off"
-            spellcheck="false"
-            placeholder="sk-..."
-          />
-          <p class="help">
-            bilidown 会下载当前B站音轨，上传到百炼48小时临时空间，并使用 Fun-ASR 生成带时间戳字幕。
-            <a
-              href="https://bailian.console.aliyun.com/?apiKey=1"
-              target="_blank"
-              rel="noreferrer"
-              >获取百炼 API Key</a>。不填写时仅尝试使用B站字幕。
+          <h2 data-i18n="asrService">语音识别服务</h2>
+          <p class="help" data-i18n="asrServiceIntro">
+            配置识别服务后，bilinote 会优先使用识别后的字幕；未配置时回退到 B 站原生字幕。
           </p>
+
+          <label for="asrProviderSelect" data-i18n="asrProviderLabel">识别引擎</label>
+          <select id="asrProviderSelect" name="asrProviderSelect">
+            <option value="bailian" data-i18n="asrProviderBailian">阿里云百炼 Fun-ASR</option>
+            <option value="minimax" data-i18n="asrProviderMinimax">minimasr asr-1.0</option>
+          </select>
+
+          <div id="bailianAsrGroup">
+            <label for="asrApiKey" data-i18n="bailianAsrKeyLabel">百炼 API Key</label>
+            <input
+              id="asrApiKey"
+              name="asrApiKey"
+              type="password"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="sk-..."
+            />
+            <p class="help">
+              <span data-i18n="bailianAsrHelp">
+                bilinote 会下载当前B站音轨，上传到百炼 48 小时临时空间，并使用 Fun-ASR
+                异步识别生成带时间戳字幕，适合任意时长。
+              </span>
+              <a
+                href="https://bailian.console.aliyun.com/?apiKey=1"
+                target="_blank"
+                rel="noreferrer"
+                data-i18n="bailianAsrLink">获取百炼 API Key</a
+              ><span data-i18n="bailianAsrHelpSuffix">。</span>
+            </p>
+          </div>
+
+          <div id="minimaxAsrGroup" style="display: none">
+            <p class="help">
+              <span data-i18n="minimaxAsrHelp">
+                minimasr-1.0 直接 multipart 上传音轨，无需中转，延迟低。
+                限制：单文件 &le; 50 MB 且 &le; 500 秒；长视频会被拒绝，请改用阿里百炼。
+              </span>
+            </p>
+            <p class="privacy-note" data-i18n="minimaxAsrKeyNote">
+              复用上方「AI 服务」中填写的 MiniMax Key，无需在此重复填写。
+            </p>
+          </div>
         </section>
 
         <section class="card">

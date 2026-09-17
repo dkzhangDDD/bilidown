@@ -669,13 +669,25 @@ async function startBilidown(videoId, videoUrl) {
   if (gen !== generation || videoId !== currentVideoId) return;
 
   if (!transcriptResult.success) {
-    const detail = transcriptResult.message || transcriptResult.error;
-    showError(
-      String(detail).includes("百炼") || String(detail).includes("音轨")
-        ? "语音识别失败"
-        : "没有找到可靠字幕",
-      detail,
-    );
+    const detail = String(transcriptResult.message || transcriptResult.error || "");
+    // Pick a Chinese title that hints at the actual cause instead of the
+    // generic "no reliable subtitles" copy when the failure has a known
+    // signature (duration limit, ASR provider error, missing subtitles).
+    let title;
+    if (detail.includes("百炼") || detail.includes("音轨")) {
+      title = "语音识别失败";
+    } else if (
+      detail.includes("MiniMax") ||
+      /duration.*exceeds.*limit/i.test(detail) ||
+      detail.includes("per-call limit")
+    ) {
+      title = "视频超出 ASR 时长上限";
+    } else if (/subtitles?\b/i.test(detail) || detail.includes("字幕")) {
+      title = "没有找到可靠字幕";
+    } else {
+      title = "识别失败";
+    }
+    showError(title, detail);
     errorAction = async () => {
       await chrome.storage.local.remove(`bilidown_${videoId}`);
       currentVideoId = null;

@@ -10,6 +10,22 @@ const YTD_OPTIONS = (() => {
       heading: "Bring your own API keys",
       lede:
         "Keys stay in this Chrome profile. Audio is sent to Alibaba Bailian for ASR, while transcripts and context are sent to DeepSeek for AI features.",
+      asrService: "Speech-to-text service",
+      asrServiceIntro:
+        "When an ASR provider is configured, bilinote uses it to transcribe audio. Otherwise it falls back to native Bilibili subtitles.",
+      asrProviderLabel: "Transcription engine",
+      asrProviderBailian: "Aliyun Bailian Fun-ASR",
+      asrProviderMinimax: "minimasr asr-1.0",
+      bailianAsrKeyLabel: "Bailian API key",
+      bailianAsrHelp:
+        "bilinote downloads the B station audio, uploads it to a 48-hour Bailian staging bucket, and runs Fun-ASR async. Works for any video length.",
+      bailianAsrLink: "Create a Bailian API key",
+      bailianAsrHelpSuffix: ".",
+      minimaxAsrHelp:
+        "minimasr-1.0 uses a synchronous multipart upload - lower latency, no staging bucket. Limit: <=50 MB and <=500 seconds per request. Longer videos are rejected; switch to Bailian instead.",
+      minimaxAsrKeyNote:
+        "Reuses the MiniMax key you entered in the AI model section above. No second key required.",
+      addAsrKey: "Add an API key for the selected ASR provider.",
       transcriptProvider: "Transcript provider",
       supadataApiKeyLabel: "Supadata API key",
       supadataHelp: "Used to fetch timestamped Bilibili subtitles. ",
@@ -91,6 +107,22 @@ const YTD_OPTIONS = (() => {
       heading: "bilidown 设置",
       lede:
         "密钥仅保存在当前 Chrome 个人资料中。音频会发送给阿里云百炼进行语音识别，字幕和视频上下文会发送给 DeepSeek 生成概览等内容。",
+      asrService: "语音识别服务",
+      asrServiceIntro:
+        "配置识别服务后，bilinote 会优先使用识别后的字幕；未配置时回退到 B 站原生字幕。",
+      asrProviderLabel: "识别引擎",
+      asrProviderBailian: "阿里云百炼 Fun-ASR",
+      asrProviderMinimax: "minimasr asr-1.0",
+      bailianAsrKeyLabel: "百炼 API 密钥",
+      bailianAsrHelp:
+        "bilinote 会下载当前B站音轨，上传到百炼 48 小时临时空间，使用 Fun-ASR 异步识别生成带时间戳字幕，适合任意时长。",
+      bailianAsrLink: "创建百炼 API 密钥",
+      bailianAsrHelpSuffix: "。",
+      minimaxAsrHelp:
+        "minimasr-1.0 直接 multipart 上传音轨，无需中转，延迟低。限制：单文件 &le; 50 MB 且 &le; 500 秒；长视频会被拒绝，请改用阿里百炼。",
+      minimaxAsrKeyNote:
+        "复用上方「AI 服务」中填写的 MiniMax Key，无需在此重复填写。",
+      addAsrKey: "请为当前选择的语音识别服务填写 API 密钥。",
       transcriptProvider: "字幕服务",
       supadataApiKeyLabel: "Supadata API 密钥",
       supadataHelp: "用于获取带时间戳的 Bilibili 字幕。",
@@ -412,6 +444,9 @@ const YTD_OPTIONS = (() => {
     const minimaxProviderGroup = doc.getElementById("minimaxProviderGroup");
     const customProviderGroup = doc.getElementById("customProviderGroup");
     const asrApiKeyInput = doc.getElementById("asrApiKey");
+    const asrProviderSelect = doc.getElementById("asrProviderSelect");
+    const bailianAsrGroup = doc.getElementById("bailianAsrGroup");
+    const minimaxAsrGroup = doc.getElementById("minimaxAsrGroup");
     const customizationPrompt = doc.getElementById("customizationPrompt");
     const copyCustomizationPromptBtn = doc.getElementById(
       "copyCustomizationPromptBtn",
@@ -442,6 +477,16 @@ const YTD_OPTIONS = (() => {
         normalized === "minimax" ? "" : "none";
       customProviderGroup.style.display =
         normalized === "custom" ? "" : "none";
+    }
+    function applyAsrProviderSelection(provider) {
+      const normalized = settingsApi.isKnownAsrProvider(provider)
+        ? provider
+        : settingsApi.DEFAULT_ASR_PROVIDER;
+      asrProviderSelect.value = normalized;
+      bailianAsrGroup.style.display =
+        normalized === "bailian" ? "" : "none";
+      minimaxAsrGroup.style.display =
+        normalized === "minimax" ? "" : "none";
     }
 
     function setStatus(element, key, params = {}) {
@@ -502,6 +547,8 @@ const YTD_OPTIONS = (() => {
         customModelInput.value = settings.customModel;
         asrApiKeyInput.value = settings.asrApiKey;
         applyProviderSelection(settings.provider);
+        asrProviderSelect.value = settings.asrProvider;
+        applyAsrProviderSelection(settings.asrProvider);
         if (migration.migrated) {
           await storage.set({ [settingsApi.STORAGE_KEY]: settings });
           setStatus(saveStatus, "migrationWarning");
@@ -526,6 +573,7 @@ const YTD_OPTIONS = (() => {
 
       const settings = settingsApi.normalize({
         provider: providerSelect.value,
+        asrProvider: asrProviderSelect.value,
         aiApiKey: aiApiKeyInput.value,
         minimaxApiKey: minimaxApiKeyInput.value,
         customApiKey: customApiKeyInput.value,
@@ -534,12 +582,11 @@ const YTD_OPTIONS = (() => {
         asrApiKey: asrApiKeyInput.value,
       });
 
-      if (
-        !settingsApi.resolveAiApiKey(settings) &&
-        !settings.asrApiKey
-      ) {
-        setStatus(saveStatus, "addDeepseekKey");
-        return;
+      if (!settingsApi.resolveAiApiKey(settings)) {
+        if (!settingsApi.resolveAsrApiKey(settings)) {
+          setStatus(saveStatus, "addDeepseekKey");
+          return;
+        }
       }
 
       try {
@@ -595,8 +642,18 @@ const YTD_OPTIONS = (() => {
     }
 
     form.addEventListener("submit", saveSettings);
+    // Auto-save when a single-choice provider dropdown switches, since
+    // mistaking a dropdown change for a persisted value is a common
+    // footgun (UI shows the new provider, but the dispatch layer keeps
+    // using the previous one until the user clicks Save). Other fields
+    // still require an explicit Save click.
     providerSelect.addEventListener("change", () => {
       applyProviderSelection(providerSelect.value);
+      form.requestSubmit();
+    });
+    asrProviderSelect.addEventListener("change", () => {
+      applyAsrProviderSelection(asrProviderSelect.value);
+      form.requestSubmit();
     });
     copyCustomizationPromptBtn.addEventListener(
       "click",
