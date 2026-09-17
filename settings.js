@@ -281,6 +281,30 @@ var YTD_SETTINGS = (() => {
     return detectPlatform(url) !== null;
   }
 
+  /**
+   * Removes model reasoning wrappers that some OpenAI-compatible providers
+   * include in message.content. Only the final user-facing answer should reach
+   * the summary UI or cache.
+   */
+  function stripReasoningTags(value) {
+    if (typeof value !== "string") return "";
+    let text = value;
+    text = text.replace(
+      /<\s*(?:think|thinking|reasoning)\b[^>]*>[\s\S]*?<\s*\/\s*(?:think|thinking|reasoning)\s*>/gi,
+      "",
+    );
+    // Also handle an unclosed reasoning block so its contents cannot leak.
+    text = text.replace(
+      /<\s*(?:think|thinking|reasoning)\b[^>]*>[\s\S]*$/gi,
+      "",
+    );
+    text = text.replace(
+      /<\s*\/\s*(?:think|thinking|reasoning)\s*>/gi,
+      "",
+    );
+    return text.trim();
+  }
+
   return {
     STORAGE_KEY,
     DEFAULTS,
@@ -304,6 +328,7 @@ var YTD_SETTINGS = (() => {
     canonicalYouTubeUrl,
     detectPlatform,
     isSupportedVideoUrl,
+    stripReasoningTags,
   };
 })();
 

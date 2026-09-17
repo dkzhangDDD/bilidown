@@ -80,6 +80,8 @@ https://api.bilibili.com/x/player/wbi/v2
 
 B 站原生字幕通常按短句返回且不带标点。bilidown 会根据字幕时间戳中的停顿和时长恢复中文逗号、句号与问号，再交给侧边栏显示。
 
+如果本机 Whisper 服务正在运行，B 站和 YouTube 原生字幕还会批量调用 `sherpa-onnx CT-Transformer` 中文/英文标点模型，停顿规则仅作为服务不可用时的兜底。
+
 ASR 不会在打开页面时自动预加载。只有点击 AI 总结后才会开始下载和识别，从而减少：
 
 - 不必要的流量消耗
@@ -422,7 +424,7 @@ npm run package
 输出文件位于：
 
 ```text
-dist/bilidown-v1.4.1.zip
+dist/bilidown-v1.4.2.zip
 ```
 
 

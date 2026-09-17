@@ -5,3 +5,4 @@ python-multipart==0.0.32
 nvidia-cuda-runtime-cu12==12.6.77
 nvidia-cublas-cu12==12.6.4.1
 nvidia-cudnn-cu12==9.17.1.4
+sherpa-onnx==1.13.8

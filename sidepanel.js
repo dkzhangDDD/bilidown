@@ -15,7 +15,7 @@ const debugLog = (...args) => {
 // ============================================================
 
 let currentVideoId = null;
-const BILIDOWN_CACHE_SCHEMA_VERSION = 9;
+const BILIDOWN_CACHE_SCHEMA_VERSION = 10;
 let generation = 0;
 let currentVideoUrl = null;
 let currentAnalysis = null;
@@ -593,6 +593,7 @@ async function startBilidown(videoId, videoUrl, platform = null) {
   // Every video change invalidates observer work and in-flight translations.
   if (videoId !== currentVideoId) {
     translationGeneration += 1;
+    isSummaryLoading = false;
     if (transcriptScrollObserver) transcriptScrollObserver.disconnect();
     transcriptScrollObserver = null;
   }
@@ -605,7 +606,7 @@ async function startBilidown(videoId, videoUrl, platform = null) {
     currentVideoId = videoId;
     currentVideoUrl = videoUrl;
     currentAnalysis = cached.analysis || null;
-    currentSummary = cached.summary || null;
+    currentSummary = YTD_SETTINGS.stripReasoningTags(cached.summary) || null;
     currentTranscript = cached.transcript;
     currentTranscriptText = cached.transcriptText;
     currentTranscriptTimestamped = cached.transcriptTimestamped;
@@ -651,6 +652,7 @@ async function startBilidown(videoId, videoUrl, platform = null) {
     // Setup explain feature
     setupExplainFeature();
     if (currentTranscriptMode !== "original") translateTranscript();
+    triggerSummary();
     return;
   }
 
@@ -747,8 +749,10 @@ async function startBilidown(videoId, videoUrl, platform = null) {
   // Save transcript to cache (without analysis)
   await saveToCache(videoId);
 
-  // DON'T run LLM analysis automatically - wait for user to click Overview tab
-  // This saves tokens when user just wants to see the transcript
+  // Start the full-note summary as soon as the transcript is ready. The
+  // Overview tab remains lazy-loaded, but the Summary tab should already be
+  // populated when the user opens it.
+  triggerSummary();
 }
 
 // ============================================================
@@ -1310,7 +1314,7 @@ function switchTab(tabName) {
     triggerAnalysis();
   }
 
-  // Lazy-load LLM summary when user switches to Summary tab
+  // Retry the summary if the automatic attempt did not produce content.
   if (tabName === "summary" && !currentSummary && !isSummaryLoading) {
     triggerSummary();
   }
@@ -1370,13 +1374,15 @@ async function triggerAnalysis() {
 }
 
 /**
- * Triggers the LLM summary (lazy-loaded when user clicks the Summary tab).
+ * Triggers the LLM summary after the transcript becomes available.
  * Converts the full transcript into a complete, structured study note.
  */
 async function triggerSummary() {
   if (!currentTranscriptTimestamped || isSummaryLoading || currentSummary)
     return;
 
+  const requestGeneration = generation;
+  const requestVideoId = currentVideoId;
   isSummaryLoading = true;
   const summaryContent = document.getElementById("summaryContent");
 
@@ -1393,27 +1399,44 @@ async function triggerSummary() {
       channelName: currentChannelName,
     });
 
+    if (
+      requestGeneration !== generation ||
+      requestVideoId !== currentVideoId
+    ) {
+      return;
+    }
+
     if (!summaryResult.success) {
       if (summaryContent) {
         summaryContent.innerHTML = `<div class="summary-error">Summary failed: ${escapeHtml(summaryResult.error || "Unknown error")}</div>`;
       }
-      isSummaryLoading = false;
       return;
     }
 
-    currentSummary = summaryResult.markdown || "";
+    currentSummary = YTD_SETTINGS.stripReasoningTags(summaryResult.markdown);
     renderSummaryResults(currentSummary);
 
     // Save to cache now that we have summary
     await saveToCache(currentVideoId);
   } catch (error) {
+    if (
+      requestGeneration !== generation ||
+      requestVideoId !== currentVideoId
+    ) {
+      return;
+    }
     console.error("[dk-bilidown Panel] Summary error:", error);
     if (summaryContent) {
       summaryContent.innerHTML = `<div class="summary-error">Error: ${escapeHtml(error.message)}</div>`;
     }
+  } finally {
+    if (
+      requestGeneration === generation &&
+      requestVideoId === currentVideoId
+    ) {
+      isSummaryLoading = false;
+    }
   }
-
-  isSummaryLoading = false;
 }
 
 /**
@@ -1422,12 +1445,13 @@ async function triggerSummary() {
 function renderSummaryResults(markdown) {
   const summaryContent = document.getElementById("summaryContent");
   if (!summaryContent) return;
-  if (!markdown) {
+  const cleanMarkdown = YTD_SETTINGS.stripReasoningTags(markdown);
+  if (!cleanMarkdown) {
     summaryContent.innerHTML =
       '<div class="summary-placeholder" style="color: var(--text-muted);">没有生成内容。</div>';
     return;
   }
-  summaryContent.innerHTML = renderMarkdown(markdown);
+  summaryContent.innerHTML = renderMarkdown(cleanMarkdown);
 }
 
 /**

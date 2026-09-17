@@ -19,6 +19,8 @@ const DEBUG = false;
 const AI_PROVIDER_IDLE_TIMEOUT_MS = 50_000;
 const AI_PROVIDER_HARD_TIMEOUT_MS = 120_000;
 const AI_PROVIDER_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+const LOCAL_WHISPER_TIMEOUT_MS = 30 * 60 * 1000;
+const transcriptRequestCache = new Map();
 const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
 };
@@ -159,7 +161,9 @@ async function requestAiCompletion({
       throw error;
     }
 
-    const text = data.choices?.[0]?.message?.content;
+    const text = YTD_SETTINGS.stripReasoningTags(
+      data.choices?.[0]?.message?.content,
+    );
     if (typeof text !== "string" || !text.trim()) {
       const error = new Error("DeepSeek returned an empty response.");
       error.code = "EMPTY_AI_RESPONSE";
@@ -317,12 +321,24 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // We need to return true to indicate we'll respond asynchronously
   if (message.action === "fetchTranscript") {
-    handleFetchTranscript(
-      message.videoId,
-      message.videoUrl,
-      message.pageNumber,
-      message.platform,
-    )
+    const requestKey = [
+      message.platform || "auto",
+      message.videoId || "",
+      message.pageNumber || 1,
+    ].join(":");
+    let requestPromise = transcriptRequestCache.get(requestKey);
+    if (!requestPromise) {
+      requestPromise = handleFetchTranscript(
+        message.videoId,
+        message.videoUrl,
+        message.pageNumber,
+        message.platform,
+      ).finally(() => {
+        transcriptRequestCache.delete(requestKey);
+      });
+      transcriptRequestCache.set(requestKey, requestPromise);
+    }
+    requestPromise
       .then(sendResponse)
       .catch((err) => sendResponse({ error: err.message }));
     return true; // Keep the message channel open for async response
@@ -908,19 +924,43 @@ async function transcribeWithLocalWhisper(videoId, cid, settings) {
   if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
 
   let response;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(
+    () => controller.abort(),
+    LOCAL_WHISPER_TIMEOUT_MS,
+  );
   try {
     response = await fetch(endpoint, {
       method: "POST",
       headers,
       body: form,
+      signal: controller.signal,
     });
   } catch (error) {
+    clearTimeout(timeoutId);
+    if (error.name === "AbortError") {
+      throw new Error(
+        "本地 Whisper 识别超过 30 分钟仍未完成，已停止等待。请检查服务日志后重试。",
+      );
+    }
     throw new Error(
       `无法连接本地 Whisper（${endpoint}）：${error.message || "连接失败"}`,
     );
   }
 
-  const rawText = await response.text();
+  let rawText;
+  try {
+    rawText = await response.text();
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error(
+        "本地 Whisper 响应超过 30 分钟仍未读取完成，已停止等待。",
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
   let payload = null;
   let jsonError = null;
   try {
@@ -1162,6 +1202,71 @@ function restoreSubtitlePunctuation(entries, language = "zh") {
   return restored.length ? restored : entries;
 }
 
+function resolveLocalPunctuationEndpoint(settings) {
+  try {
+    const endpoint = YTD_SETTINGS.resolveAsrEndpoint(settings);
+    const url = new URL(endpoint);
+    if (url.hostname !== "localhost" && url.hostname !== "127.0.0.1") {
+      return null;
+    }
+    return `${url.origin}/v1/punctuation`;
+  } catch (_error) {
+    return null;
+  }
+}
+
+async function punctuateTextsWithLocalService(texts, language = "zh") {
+  if (!Array.isArray(texts) || texts.length === 0) return null;
+
+  const settings = await getSettings();
+  const endpoint = resolveLocalPunctuationEndpoint(settings);
+  if (!endpoint) return null;
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ texts, language }),
+      signal: controller.signal,
+    });
+    if (!response.ok) return null;
+    const payload = await response.json();
+    if (
+      !Array.isArray(payload.texts) ||
+      payload.texts.length !== texts.length ||
+      payload.texts.some((text) => typeof text !== "string")
+    ) {
+      return null;
+    }
+    return payload.texts;
+  } catch (_error) {
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function restoreSubtitlePunctuationWithModel(entries, language = "zh") {
+  const grouped = restoreSubtitlePunctuation(entries, language);
+  const compactTexts = grouped.map((entry) =>
+    String(entry.text || "")
+      .replace(/[，。！？；：、,.!?;:]+/g, "")
+      .trim(),
+  );
+  const punctuatedTexts = await punctuateTextsWithLocalService(
+    compactTexts,
+    language,
+  );
+  if (!punctuatedTexts) return grouped;
+
+  return grouped.map((entry, index) => ({
+    ...entry,
+    text: punctuatedTexts[index] || entry.text,
+  }));
+}
+
 /**
  * YouTube transcript fetching copied from the mature upstream
  * zarazhangrui/youtube-digest implementation. It asks Supadata for the
@@ -1270,7 +1375,7 @@ async function handleFetchYouTubeTranscript(videoId) {
       };
     }
 
-    const restoredTranscript = restoreSubtitlePunctuation(
+    const restoredTranscript = await restoreSubtitlePunctuationWithModel(
       transcript,
       typeof data.lang === "string" ? data.lang : "zh",
     );
@@ -1422,7 +1527,7 @@ async function handleFetchTranscript(
         throw new Error("B 站返回了空字幕。");
       }
 
-      const restoredTranscript = restoreSubtitlePunctuation(
+      const restoredTranscript = await restoreSubtitlePunctuationWithModel(
         transcript,
         preferred.lan || "zh",
       );
@@ -1532,7 +1637,7 @@ async function pollTranscriptJob(jobId, supadataApiKey) {
         }
       }
 
-      const restoredTranscript = restoreSubtitlePunctuation(
+      const restoredTranscript = await restoreSubtitlePunctuationWithModel(
         transcript,
         typeof data.lang === "string" ? data.lang : "zh",
       );

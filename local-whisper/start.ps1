@@ -43,6 +43,7 @@ $env:WHISPER_DEVICE = "auto"
 $env:WHISPER_COMPUTE_TYPE = "auto"
 $env:WHISPER_HOST = "127.0.0.1"
 $env:WHISPER_PORT = "9000"
+$env:WHISPER_PUNCT_MODEL = Join-Path $runtimeRoot "models\sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8\model.int8.onnx"
 
 $stdout = Join-Path $logRoot "server.out.log"
 $stderr = Join-Path $logRoot "server.err.log"

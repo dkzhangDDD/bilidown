@@ -1,8 +1,8 @@
 # Summary / Note Prompt
 
-Used in `background.js` when the user opens the **总结 (Summary)** tab.
-Converts the FULL transcript of a talk into a concise, focused, well-structured
-study note — the essence of the talk, not a line-by-line rehash of the transcript.
+Used in `background.js` as soon as a transcript is ready. Converts the FULL
+transcript of a talk into a concise, focused, well-structured study note — the
+essence of the talk, not a line-by-line rehash of the transcript.
 
 ## System prompt
 

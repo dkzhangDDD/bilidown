@@ -4,14 +4,17 @@ import os
 import re
 import tempfile
 import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse
+from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
+from punctuation_runtime import PunctuationRestorer
 from whisper_runtime import MODEL_NAME, load_whisper_model
 
 
@@ -37,12 +40,15 @@ VAD_FILTER = os.getenv("WHISPER_VAD_FILTER", "1").strip() not in {
 state_lock = threading.Lock()
 transcribe_lock = threading.Lock()
 model_instance = None
+punctuation_restorer = None
 model_state: dict[str, Any] = {
     "status": "loading",
     "model": MODEL_NAME,
     "device": None,
     "compute_type": None,
     "error": None,
+    "punctuation_status": "loading",
+    "punctuation_error": None,
 }
 
 
@@ -57,10 +63,22 @@ def get_model_state() -> dict[str, Any]:
 
 
 def load_model_worker() -> None:
-    global model_instance
+    global model_instance, punctuation_restorer
     try:
         model, device, compute_type = load_whisper_model()
         model_instance = model
+        try:
+            punctuation_restorer = PunctuationRestorer()
+            set_model_state(
+                punctuation_status="ready",
+                punctuation_error=None,
+            )
+        except Exception as punctuation_error:
+            punctuation_restorer = None
+            set_model_state(
+                punctuation_status="error",
+                punctuation_error=str(punctuation_error),
+            )
         set_model_state(
             status="ready",
             device=device,
@@ -221,6 +239,43 @@ def build_transcript_segments(segments: Any) -> list[dict[str, Any]]:
     return output_segments
 
 
+class PunctuationRequest(BaseModel):
+    text: str | None = None
+    texts: list[str] | None = None
+
+
+@app.post("/v1/punctuation", response_model=None)
+def punctuation_endpoint(request: PunctuationRequest) -> JSONResponse:
+    status = get_model_state()
+    if status["punctuation_status"] == "error":
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Punctuation model failed to load: "
+                f"{status['punctuation_error']}"
+            ),
+        )
+    if status["punctuation_status"] != "ready":
+        raise HTTPException(
+            status_code=503,
+            detail="Punctuation model is still loading.",
+        )
+
+    if request.text is not None:
+        return JSONResponse(
+            {"text": punctuation_restorer.add_punctuation(request.text)}
+        )
+    if request.texts is not None:
+        return JSONResponse(
+            {
+                "texts": punctuation_restorer.add_punctuation_batch(
+                    request.texts
+                )
+            }
+        )
+    raise HTTPException(status_code=400, detail="Provide text or texts.")
+
+
 def normalize_zh_punctuation(text: str) -> str:
     translation = str.maketrans(
         {
@@ -300,6 +355,23 @@ def restore_punctuation(
     return segments
 
 
+def apply_punctuation_model(
+    segments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if punctuation_restorer is None or not segments:
+        return segments
+
+    compact_texts = [
+        re.sub(r"[，。！？；：、,.!?;:]+", "", str(segment["text"] or "")).strip()
+        for segment in segments
+    ]
+    punctuated_texts = punctuation_restorer.add_punctuation_batch(compact_texts)
+    for segment, punctuated in zip(segments, punctuated_texts):
+        if punctuated:
+            segment["text"] = punctuated
+    return segments
+
+
 def transcribe_file(path: str, language: str | None) -> dict[str, Any]:
     status = get_model_state()
     if status["status"] == "error":
@@ -323,7 +395,18 @@ def transcribe_file(path: str, language: str | None) -> dict[str, Any]:
             "以下是普通话内容。请使用自然语句断句，并输出简体中文标点。"
         )
 
-    with transcribe_lock:
+    if not transcribe_lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                "Local Whisper is already transcribing another request. "
+                "Wait for it to finish before retrying."
+            ),
+        )
+
+    started_at = time.perf_counter()
+    print("Transcription started.", flush=True)
+    try:
         segments, info = model_instance.transcribe(
             path,
             beam_size=BEAM_SIZE,
@@ -334,10 +417,26 @@ def transcribe_file(path: str, language: str | None) -> dict[str, Any]:
             initial_prompt=initial_prompt,
         )
         output_segments = restore_punctuation(
-            build_transcript_segments(segments),
+            apply_punctuation_model(build_transcript_segments(segments)),
             effective_language,
         )
         text_parts = [segment["text"] for segment in output_segments]
+    except Exception as error:
+        elapsed = time.perf_counter() - started_at
+        print(
+            f"Transcription failed after {elapsed:.2f}s: {error}",
+            flush=True,
+        )
+        raise
+    finally:
+        transcribe_lock.release()
+
+    elapsed = time.perf_counter() - started_at
+    print(
+        f"Transcription completed in {elapsed:.2f}s "
+        f"with {len(output_segments)} segments.",
+        flush=True,
+    )
 
     return {
         "task": "transcribe",
