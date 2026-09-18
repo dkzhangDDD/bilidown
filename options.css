@@ -176,6 +176,45 @@ a {
   font-size: 13px;
 }
 
+.local-whisper-guide {
+  margin-top: 12px;
+}
+
+.local-whisper-guide > summary {
+  display: inline-block;
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.7;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.local-whisper-guide > summary:hover {
+  color: var(--accent-hover);
+}
+
+.local-whisper-guide > summary::-webkit-details-marker {
+  display: none;
+}
+
+.local-whisper-guide > summary {
+  list-style: none;
+}
+
+.local-whisper-guide .guide-steps {
+  margin: 10px 0 6px;
+  padding-left: 22px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.local-whisper-guide .guide-steps li {
+  margin: 4px 0;
+}
+
 .provider-summary,
 .copy-actions {
   display: flex;

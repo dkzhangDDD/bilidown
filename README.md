@@ -424,7 +424,7 @@ npm run package
 输出文件位于：
 
 ```text
-dist/bilidown-v1.4.2.zip
+dist/bilidown-v1.4.3.zip
 ```
 
 

@@ -128,10 +128,20 @@
               placeholder="仅本机服务要求鉴权时填写"
             />
             <p class="help" data-i18n="whisperAsrHelp">
-              支持 OpenAI 兼容的 /v1/audio/transcriptions，也可直接填写
-              whisper.cpp 的 /inference 地址。扩展会把 B 站音轨发送到该本机服务并读取分段结果。
-              B 站音轨是 M4A，whisper.cpp 需启用 --convert 并安装 ffmpeg。
+              走本地 OpenAI 兼容的 <code>/v1/audio/transcriptions</code>，也兼容
+              <code>whisper.cpp</code> 的 <code>/inference</code>。使用 whisper.cpp 时请加
+              <code>--convert</code> 并装 ffmpeg，因为 B 站音轨是 M4A。
             </p>
+            <details class="local-whisper-guide" data-i18n-aria-label="whisperGuideAriaLabel">
+              <summary data-i18n="whisperGuideSummary">本地 Whisper 启动指引</summary>
+              <ol class="guide-steps">
+                <li data-i18n="whisperGuideStepInstall">装好 Python 3.10+，<code>pip install -r local-whisper\requirements.txt</code>。</li>
+                <li data-i18n="whisperGuideStepModel">运行 <code>local-whisper\download_model.ps1</code> 下载 Whisper 和中文标点模型。</li>
+                <li data-i18n="whisperGuideStepStart">运行 <code>powershell -File local-whisper\start.ps1</code> 启动服务。</li>
+                <li data-i18n="whisperGuideStepVerify">打开 <a href="http://127.0.0.1:9000/health" target="_blank" rel="noreferrer">http://127.0.0.1:9000/health</a>，<code>status</code> 与 <code>punctuation_status</code> 同时为 <code>ready</code> 即就绪。</li>
+                <li data-i18n="whisperGuideStepFill">在设置页选「本地 Whisper」，地址填 <code>http://127.0.0.1:9000/v1/audio/transcriptions</code>，模型名称填 <code>large-v3-turbo</code>，API Key 留空。</li>
+              </ol>
+            </details>
             <p class="privacy-note" data-i18n="whisperPrivacyNote">
               地址必须使用 http://localhost 或 http://127.0.0.1。音频只发送到本机端口，
               不会经过开发者服务器。

@@ -14,14 +14,26 @@ const YTD_OPTIONS = (() => {
       asrServiceIntro:
         "Bilibili native subtitles are checked first. Only when none are available does bilidown use the selected ASR provider.",
       asrProviderLabel: "Transcription engine",
-      asrProviderBailian: "Aliyun Bailian Fun-ASR",
+      asrProviderBailian: "Aliyun Bailian Fun-ASR (recommended)",
       asrProviderMinimax: "minimasr asr-1.0",
       asrProviderWhisper: "Local Whisper",
       whisperEndpointLabel: "Local service URL",
       whisperModelLabel: "Model name",
       whisperApiKeyLabel: "API key (optional)",
       whisperAsrHelp:
-        "Supports an OpenAI-compatible /v1/audio/transcriptions endpoint or whisper.cpp's /inference endpoint. bilidown sends the Bilibili audio to this local service and reads timestamped segments. whisper.cpp must run with --convert because Bilibili audio is M4A.",
+        "Local OpenAI-compatible /v1/audio/transcriptions, also compatible with whisper.cpp /inference. For whisper.cpp add --convert and install ffmpeg, because Bilibili audio is M4A.",
+      whisperGuideAriaLabel: "Local Whisper setup guide",
+      whisperGuideSummary: "Local Whisper setup guide",
+      whisperGuideStepInstall:
+        "Install Python 3.10+, then run `pip install -r local-whisper\\requirements.txt`.",
+      whisperGuideStepModel:
+        "Run `local-whisper\\download_model.ps1` to download the Whisper and Chinese punctuation models.",
+      whisperGuideStepStart:
+        "Run `powershell -File local-whisper\\start.ps1` to start the service.",
+      whisperGuideStepVerify:
+        "Open http://127.0.0.1:9000/health and confirm both `status` and `punctuation_status` are `ready`.",
+      whisperGuideStepFill:
+        "In this extension settings: pick Local Whisper, URL `http://127.0.0.1:9000/v1/audio/transcriptions`, model name `large-v3-turbo`, leave API key empty.",
       whisperPrivacyNote:
         "The URL must use http://localhost or http://127.0.0.1. Audio is sent only to that local port and never to a developer server.",
       invalidWhisperEndpoint:
@@ -121,14 +133,26 @@ const YTD_OPTIONS = (() => {
       asrServiceIntro:
         "bilidown 会先检查 B 站原生字幕；只有没有可用字幕时，才使用所选的语音识别服务。",
       asrProviderLabel: "识别引擎",
-      asrProviderBailian: "阿里云百炼 Fun-ASR",
+      asrProviderBailian: "阿里云百炼 Fun-ASR（首推）",
       asrProviderMinimax: "minimasr asr-1.0",
       asrProviderWhisper: "本地 Whisper",
       whisperEndpointLabel: "本机服务地址",
       whisperModelLabel: "模型名称",
       whisperApiKeyLabel: "API Key（可选）",
       whisperAsrHelp:
-        "支持 OpenAI 兼容的 /v1/audio/transcriptions，也可直接填写 whisper.cpp 的 /inference 地址。扩展会把 B 站音轨发送到该本机服务并读取分段结果。B 站音轨是 M4A，whisper.cpp 需启用 --convert 并安装 ffmpeg。",
+        "走本地 OpenAI 兼容的 /v1/audio/transcriptions，也兼容 whisper.cpp 的 /inference。使用 whisper.cpp 时请加 --convert 并装 ffmpeg，因为 B 站音轨是 M4A。",
+      whisperGuideAriaLabel: "本地 Whisper 启动指引",
+      whisperGuideSummary: "本地 Whisper 启动指引",
+      whisperGuideStepInstall:
+        "装好 Python 3.10+，运行 `pip install -r local-whisper\\requirements.txt`。",
+      whisperGuideStepModel:
+        "运行 `local-whisper\\download_model.ps1` 下载 Whisper 和中文标点模型。",
+      whisperGuideStepStart:
+        "运行 `powershell -File local-whisper\\start.ps1` 启动服务。",
+      whisperGuideStepVerify:
+        "打开 http://127.0.0.1:9000/health，确认 `status` 与 `punctuation_status` 都为 `ready`。",
+      whisperGuideStepFill:
+        "回到本扩展设置：识别引擎选「本地 Whisper」，地址填 `http://127.0.0.1:9000/v1/audio/transcriptions`，模型名称填 `large-v3-turbo`，API Key 留空。",
       whisperPrivacyNote:
         "地址必须使用 http://localhost 或 http://127.0.0.1。音频只发送到本机端口，不会经过开发者服务器。",
       invalidWhisperEndpoint:
