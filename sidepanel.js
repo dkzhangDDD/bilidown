@@ -1473,6 +1473,70 @@ function renderMarkdown(markdown) {
     return div.innerHTML;
   };
 
+  // GFM 表格行识别：行首行尾都是 `|`（兼容 LLM 偶尔输出转义的 `\|`）
+  const isTableRow = (line) => /^\s*\\?\|.*\\?\|\s*$/.test(line);
+
+  // 拆出一个表格行的单元格，忽略首尾 `|`；先把 `\|` 还原成普通分隔符
+  const splitTableCells = (line) => {
+    let inner = line.trim().replace(/\\\|/g, "|");
+    if (inner.startsWith("|")) inner = inner.slice(1);
+    if (inner.endsWith("|")) inner = inner.slice(0, -1);
+    const cells = [];
+    let current = "";
+    let escaped = false;
+    for (let i = 0; i < inner.length; i++) {
+      const ch = inner[i];
+      if (escaped) {
+        current += ch;
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === "|") {
+        cells.push(current.trim());
+        current = "";
+      } else {
+        current += ch;
+      }
+    }
+    cells.push(current.trim());
+    return cells;
+  };
+
+  // 表格分隔行：如 |:---|:--:|---:|
+  const isSeparatorRow = (line) => {
+    if (!isTableRow(line)) return false;
+    const cells = splitTableCells(line);
+    return cells.every((cell) => /^:?-{1,}:?$/.test(cell.trim()));
+  };
+
+  // 把连续的表格行（允许中间夹空行）解析成 HTML table
+  const renderTableBlock = (tableLines) => {
+    const rows = tableLines.map(splitTableCells);
+    const colCount = Math.max(...rows.map((cells) => cells.length));
+    const headerIndex = tableLines.findIndex(isSeparatorRow);
+    const hasHeader = headerIndex >= 0;
+    const body = [];
+
+    for (let i = 0; i < rows.length; i++) {
+      if (isSeparatorRow(tableLines[i])) continue;
+      const cells = rows[i];
+      while (cells.length < colCount) cells.push("");
+      const tag = hasHeader && i < headerIndex ? "th" : "td";
+      body.push(
+        `<tr>${cells
+          .map((cell) => `<${tag}>${inline(escapeHtml(cell))}</${tag}>`)
+          .join("")}</tr>`,
+      );
+    }
+
+    if (hasHeader && headerIndex > 0) {
+      const headerRows = body.slice(0, headerIndex);
+      const dataRows = body.slice(headerIndex);
+      return `<table><thead>${headerRows.join("")}</thead><tbody>${dataRows.join("")}</tbody></table>`;
+    }
+    return `<table><tbody>${body.join("")}</tbody></table>`;
+  };
+
   // Inline formatting, applied AFTER escaping. Only run on escaped text.
   const inline = (text) =>
     text
@@ -1496,8 +1560,8 @@ function renderMarkdown(markdown) {
     }
   };
 
-  for (let raw of lines) {
-    const line = raw;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
 
     // Code fence
     if (/^```/.test(line)) {
@@ -1513,6 +1577,28 @@ function renderMarkdown(markdown) {
     }
     if (inFence) {
       fenceBuf.push(line);
+      continue;
+    }
+
+    // GFM 表格：把连续表格行（含中间空行）一起收集后渲染
+    if (isTableRow(line)) {
+      closeList();
+      const tableBlock = [];
+      while (i < lines.length) {
+        if (isTableRow(lines[i])) {
+          tableBlock.push(lines[i]);
+          i++;
+        } else if (
+          lines[i].trim() === "" &&
+          i + 1 < lines.length &&
+          isTableRow(lines[i + 1])
+        ) {
+          i++;
+        } else {
+          break;
+        }
+      }
+      html.push(renderTableBlock(tableBlock));
       continue;
     }
 

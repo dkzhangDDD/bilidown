@@ -1462,6 +1462,35 @@ body {
   color: var(--text-secondary);
 }
 
+/* GFM 表格样式：窄侧栏里用横向滚动，不让长文本把表格挤变形 */
+.summary-content table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin: 10px 0;
+  font-size: 13px;
+  line-height: 1.55;
+}
+.summary-content th,
+.summary-content td {
+  border: 1px solid var(--border-heavy, #c9ccd0);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+  word-break: break-word;
+  white-space: normal;
+}
+.summary-content th {
+  background: var(--surface-raised, #f1f2f3);
+  font-weight: 600;
+  color: var(--text-primary, #18191c);
+}
+.summary-content tr:nth-child(2n) {
+  background: var(--surface-raised, #f1f2f3);
+}
+
 .summary-content code {
   font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
   font-size: 0.9em;
