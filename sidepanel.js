@@ -15,7 +15,7 @@ const debugLog = (...args) => {
 // ============================================================
 
 let currentVideoId = null;
-const BILIDOWN_CACHE_SCHEMA_VERSION = 10;
+const BILIDOWN_CACHE_SCHEMA_VERSION = 13;
 let generation = 0;
 let currentVideoUrl = null;
 let currentAnalysis = null;
@@ -208,35 +208,15 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
     if (!current) {
       current = { start: piece.start, end: piece.end, text: "" };
     }
-    const gap = Math.max(0, piece.start - current.end);
     current.text = normalizeCaptionText(`${current.text} ${piece.text}`);
     current.end = Math.max(current.end, piece.end);
     const elapsed = Math.max(0, piece.start - current.start);
-    const comfortablySized = current.text.length >= limits.minChars;
-    const reachedIdeal = current.text.length >= limits.idealChars;
-    const atNaturalBoundary =
-      piece.semanticEnd ||
-      (piece.clauseEnd &&
-        (reachedIdeal ||
-          current.text.length >= limits.maxChars ||
-          elapsed >= limits.maxSeconds));
-    const pauseBoundary = gap >= 0.65 && elapsed >= 1.5;
-    const reachedGuardrail =
-      atNaturalBoundary &&
-      (current.text.length >= limits.maxChars || elapsed >= limits.maxSeconds);
+    const atNaturalBoundary = piece.semanticEnd;
     const reachedHardGuardrail =
       current.text.length >= Math.round(limits.maxChars * 1.2) ||
       elapsed >= limits.maxSeconds + 5;
 
-    if (
-      (atNaturalBoundary &&
-        (comfortablySized ||
-          elapsed >= Math.min(6, limits.maxSeconds))) ||
-      (atNaturalBoundary && reachedIdeal) ||
-      pauseBoundary ||
-      reachedGuardrail ||
-      reachedHardGuardrail
-    ) {
+    if (atNaturalBoundary || reachedHardGuardrail) {
       flush();
     }
   });

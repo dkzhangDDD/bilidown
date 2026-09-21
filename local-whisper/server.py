@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
-from punctuation_runtime import PunctuationRestorer
+from punctuation_runtime import PunctuationRestorer, punctuate_timed_units
 from whisper_runtime import MODEL_NAME, load_whisper_model
 
 
@@ -244,6 +244,17 @@ class PunctuationRequest(BaseModel):
     texts: list[str] | None = None
 
 
+class TimedPunctuationSegment(BaseModel):
+    text: str
+    start: float
+    end: float
+
+
+class TimedPunctuationRequest(BaseModel):
+    segments: list[TimedPunctuationSegment]
+    language: str | None = "zh"
+
+
 @app.post("/v1/punctuation", response_model=None)
 def punctuation_endpoint(request: PunctuationRequest) -> JSONResponse:
     status = get_model_state()
@@ -274,6 +285,45 @@ def punctuation_endpoint(request: PunctuationRequest) -> JSONResponse:
             }
         )
     raise HTTPException(status_code=400, detail="Provide text or texts.")
+
+
+@app.post("/v1/punctuation/timed", response_model=None)
+def timed_punctuation_endpoint(
+    request: TimedPunctuationRequest,
+) -> JSONResponse:
+    status = get_model_state()
+    if status["punctuation_status"] == "error":
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Punctuation model failed to load: "
+                f"{status['punctuation_error']}"
+            ),
+        )
+    if status["punctuation_status"] != "ready":
+        raise HTTPException(
+            status_code=503,
+            detail="Punctuation model is still loading.",
+        )
+    if punctuation_restorer is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Punctuation model is unavailable.",
+        )
+
+    input_segments = [
+        {
+            "text": segment.text,
+            "start": float(segment.start),
+            "end": float(segment.end),
+        }
+        for segment in request.segments
+    ]
+    output_segments = punctuate_timed_units(
+        input_segments,
+        punctuation_restorer,
+    )
+    return JSONResponse({"segments": output_segments})
 
 
 def normalize_zh_punctuation(text: str) -> str:
@@ -355,23 +405,6 @@ def restore_punctuation(
     return segments
 
 
-def apply_punctuation_model(
-    segments: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    if punctuation_restorer is None or not segments:
-        return segments
-
-    compact_texts = [
-        re.sub(r"[，。！？；：、,.!?;:]+", "", str(segment["text"] or "")).strip()
-        for segment in segments
-    ]
-    punctuated_texts = punctuation_restorer.add_punctuation_batch(compact_texts)
-    for segment, punctuated in zip(segments, punctuated_texts):
-        if punctuated:
-            segment["text"] = punctuated
-    return segments
-
-
 def transcribe_file(path: str, language: str | None) -> dict[str, Any]:
     status = get_model_state()
     if status["status"] == "error":
@@ -416,10 +449,37 @@ def transcribe_file(path: str, language: str | None) -> dict[str, Any]:
             condition_on_previous_text=False,
             initial_prompt=initial_prompt,
         )
-        output_segments = restore_punctuation(
-            apply_punctuation_model(build_transcript_segments(segments)),
-            effective_language,
-        )
+        raw_units = []
+        for segment in segments:
+            words = getattr(segment, "words", None)
+            if words:
+                raw_units.extend(
+                    {
+                        "text": str(word.word or ""),
+                        "start": float(word.start or 0),
+                        "end": float(word.end or word.start or 0),
+                    }
+                    for word in words
+                )
+            else:
+                raw_units.append(
+                    {
+                        "text": str(segment.text or ""),
+                        "start": float(segment.start or 0),
+                        "end": float(segment.end or segment.start or 0),
+                    }
+                )
+
+        if punctuation_restorer is None:
+            output_segments = restore_punctuation(
+                build_transcript_segments(segments),
+                effective_language,
+            )
+        else:
+            output_segments = punctuate_timed_units(
+                raw_units,
+                punctuation_restorer,
+            )
         text_parts = [segment["text"] for segment in output_segments]
     except Exception as error:
         elapsed = time.perf_counter() - started_at

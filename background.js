@@ -1202,45 +1202,59 @@ function restoreSubtitlePunctuation(entries, language = "zh") {
   return restored.length ? restored : entries;
 }
 
-function resolveLocalPunctuationEndpoint(settings) {
+function resolveLocalPunctuationBase(settings) {
   try {
     const endpoint = YTD_SETTINGS.resolveAsrEndpoint(settings);
     const url = new URL(endpoint);
     if (url.hostname !== "localhost" && url.hostname !== "127.0.0.1") {
       return null;
     }
-    return `${url.origin}/v1/punctuation`;
+    return url.origin;
   } catch (_error) {
     return null;
   }
 }
 
-async function punctuateTextsWithLocalService(texts, language = "zh") {
-  if (!Array.isArray(texts) || texts.length === 0) return null;
+async function punctuateTimedSegmentsWithLocalService(
+  entries,
+  language = "zh",
+) {
+  if (!Array.isArray(entries) || entries.length === 0) return null;
 
   const settings = await getSettings();
-  const endpoint = resolveLocalPunctuationEndpoint(settings);
-  if (!endpoint) return null;
+  const base = resolveLocalPunctuationBase(settings);
+  if (!base) return null;
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 15_000);
+  const timeoutId = setTimeout(() => controller.abort(), 60_000);
   try {
-    const response = await fetch(endpoint, {
+    const response = await fetch(`${base}/v1/punctuation/timed`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ texts, language }),
+      body: JSON.stringify({
+        segments: entries.map((entry) => ({
+          text: String(entry?.text || ""),
+          start: Math.max(0, Number(entry?.start) || 0),
+          end:
+            Math.max(0, Number(entry?.start) || 0) +
+            Math.max(0, Number(entry?.duration) || 0),
+        })),
+        language,
+      }),
       signal: controller.signal,
     });
     if (!response.ok) return null;
     const payload = await response.json();
     if (
-      !Array.isArray(payload.texts) ||
-      payload.texts.length !== texts.length ||
-      payload.texts.some((text) => typeof text !== "string")
+      !Array.isArray(payload.segments) ||
+      payload.segments.length !== entries.length ||
+      payload.segments.some(
+        (segment) => !segment || typeof segment.text !== "string",
+      )
     ) {
       return null;
     }
-    return payload.texts;
+    return payload.segments;
   } catch (_error) {
     return null;
   } finally {
@@ -1249,22 +1263,26 @@ async function punctuateTextsWithLocalService(texts, language = "zh") {
 }
 
 async function restoreSubtitlePunctuationWithModel(entries, language = "zh") {
-  const grouped = restoreSubtitlePunctuation(entries, language);
-  const compactTexts = grouped.map((entry) =>
-    String(entry.text || "")
-      .replace(/[，。！？；：、,.!?;:]+/g, "")
-      .trim(),
-  );
-  const punctuatedTexts = await punctuateTextsWithLocalService(
-    compactTexts,
+  const punctuatedSegments = await punctuateTimedSegmentsWithLocalService(
+    entries,
     language,
   );
-  if (!punctuatedTexts) return grouped;
-
-  return grouped.map((entry, index) => ({
-    ...entry,
-    text: punctuatedTexts[index] || entry.text,
-  }));
+  if (punctuatedSegments) {
+    return punctuatedSegments.map((segment) => ({
+      ...segment,
+      start: Math.max(0, Number(segment?.start) || 0),
+      end: Math.max(
+        Math.max(0, Number(segment?.start) || 0),
+        Number(segment?.end) || 0,
+      ),
+      duration: Math.max(
+        0,
+        Number(segment?.end || 0) - Number(segment?.start || 0),
+      ),
+      language: segment?.language || language,
+    }));
+  }
+  return restoreSubtitlePunctuation(entries, language);
 }
 
 /**
