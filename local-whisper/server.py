@@ -339,6 +339,25 @@ def normalize_zh_punctuation(text: str) -> str:
     return text.translate(translation)
 
 
+def resolve_punctuation_language(
+    requested: str | None,
+    detected: str | None,
+) -> str | None:
+    """Pick the language used by the rule-based punctuation fallback.
+
+    The rule-based fallback only applies CJK sentence punctuation when the
+    language is exactly "zh". Whisper can be launched with no language, with
+    "auto", or with a language that does not match the audio, and any of those
+    used to skip punctuation entirely and hand the UI one unpunctuated block.
+    Prefer whichever side reports Chinese.
+    """
+    if requested and str(requested).lower().startswith("zh"):
+        return requested
+    if detected and str(detected).lower().startswith("zh"):
+        return detected
+    return requested or detected
+
+
 def restore_punctuation(
     segments: list[dict[str, Any]],
     language: str | None,
@@ -428,7 +447,7 @@ def transcribe_file(path: str, language: str | None) -> dict[str, Any]:
             "以下是普通话内容。请使用自然语句断句，并输出简体中文标点。"
         )
 
-    if not transcribe_lock.acquire(blocking=False):
+    if not transcribe_lock.acquire(timeout=30):
         raise HTTPException(
             status_code=429,
             detail=(
@@ -438,6 +457,10 @@ def transcribe_file(path: str, language: str | None) -> dict[str, Any]:
         )
 
     started_at = time.perf_counter()
+    queued_at = started_at
+    lock_waited = started_at - queued_at
+    if lock_waited > 0.2:
+        print(f"Transcription lock waited {lock_waited:.2f}s.", flush=True)
     print("Transcription started.", flush=True)
     try:
         segments, info = model_instance.transcribe(
@@ -473,7 +496,10 @@ def transcribe_file(path: str, language: str | None) -> dict[str, Any]:
         if punctuation_restorer is None:
             output_segments = restore_punctuation(
                 build_transcript_segments(segments),
-                effective_language,
+                resolve_punctuation_language(
+                    effective_language,
+                    getattr(info, "language", None),
+                ),
             )
         else:
             output_segments = punctuate_timed_units(

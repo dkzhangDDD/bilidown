@@ -52,7 +52,7 @@ npm run check
 npm run package
 ```
 
-打包结果位于 `dist/bilidown-v1.4.4.zip`。
+打包结果位于 `dist/bilidown-v1.5.0.zip`。
 
 ## 许可证
 

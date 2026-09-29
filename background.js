@@ -20,6 +20,11 @@ const AI_PROVIDER_IDLE_TIMEOUT_MS = 50_000;
 const AI_PROVIDER_HARD_TIMEOUT_MS = 120_000;
 const AI_PROVIDER_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const LOCAL_WHISPER_TIMEOUT_MS = 30 * 60 * 1000;
+// The local service loads Whisper and the punctuation model on startup and
+// answers 503 until both are ready. Wait it out instead of silently writing a
+// degraded transcript into the cache.
+const PUNCTUATION_WARMUP_TIMEOUT_MS = 45_000;
+const PUNCTUATION_WARMUP_INTERVAL_MS = 3_000;
 const transcriptRequestCache = new Map();
 const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
@@ -659,7 +664,9 @@ async function fetchBilibiliAudioBlob(videoId, cid) {
   // Selecting the smallest track cuts both the CDN download and Bailian upload.
   const audio = audioTracks[0];
   const candidates = [audio?.baseUrl, audio?.base_url, ...(audio?.backupUrl || []), ...(audio?.backup_url || [])].filter(Boolean);
-  if (!candidates.length) throw new Error("无法获取B站音轨地址。");
+  if (!candidates.length) {
+    return await fetchBilibiliMp4AudioBlob(videoId, cid);
+  }
 
   let lastError;
   for (const url of candidates) {
@@ -674,6 +681,33 @@ async function fetchBilibiliAudioBlob(videoId, cid) {
           subtitle: `低码率音轨约 ${(expectedBytes / 1024 / 1024).toFixed(1)} MB`,
         }).catch(() => {});
       }
+      const blob = await audioResponse.blob();
+      if (!blob.size) throw new Error("音轨为空");
+      return new Blob([blob], { type: "audio/mp4" });
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw new Error(`B站音轨下载失败：${lastError?.message || "未知错误"}`);
+}
+
+async function fetchBilibiliMp4AudioBlob(videoId, cid) {
+  const response = await fetch(
+    `https://api.bilibili.com/x/player/playurl?bvid=${encodeURIComponent(videoId)}&cid=${encodeURIComponent(cid)}&qn=16`,
+    { credentials: "include" },
+  );
+  const payload = await response.json();
+  const candidates = (payload.data?.durl || [])
+    .map((entry) => entry?.url || entry?.backup_url)
+    .filter(Boolean);
+  if (!candidates.length) {
+    throw new Error("无法获取B站音轨地址。");
+  }
+  let lastError;
+  for (const url of candidates) {
+    try {
+      const audioResponse = await fetch(url);
+      if (!audioResponse.ok) throw new Error(`HTTP ${audioResponse.status}`);
       const blob = await audioResponse.blob();
       if (!blob.size) throw new Error("音轨为空");
       return new Blob([blob], { type: "audio/mp4" });
@@ -1116,6 +1150,41 @@ function normalizeSubtitleText(text) {
     .trim();
 }
 
+/**
+ * Strips punctuation and whitespace so two renditions of the same speech can
+ * be compared character by character.
+ */
+function normalizeForPunctuationComparison(text) {
+  return String(text || "").replace(
+    /[\s，。！？!?…；;：:,.、"'“”‘’()（）\[\]【】<>《》\-—]/g,
+    "",
+  );
+}
+
+/**
+ * The local punctuation service re-chunks the transcript on sentence
+ * boundaries, so its segment count legitimately differs from the request.
+ * Comparing the underlying characters lets us accept that re-chunking while
+ * still rejecting truncated, empty, or garbled model output.
+ */
+function punctuationResultLooksComplete(sourceText, candidateText) {
+  const source = normalizeForPunctuationComparison(sourceText);
+  const candidate = normalizeForPunctuationComparison(candidateText);
+  if (!source || !candidate) return false;
+  if (candidate.length < source.length * 0.9) return false;
+  if (candidate.length > source.length * 1.1) return false;
+
+  let cursor = 0;
+  let matched = 0;
+  for (const char of candidate) {
+    if (cursor < source.length && char === source[cursor]) {
+      cursor += 1;
+      matched += 1;
+    }
+  }
+  return matched >= source.length * 0.9;
+}
+
 function restoreSubtitlePunctuation(entries, language = "zh") {
   if (!Array.isArray(entries) || entries.length === 0) return [];
 
@@ -1152,6 +1221,11 @@ function restoreSubtitlePunctuation(entries, language = "zh") {
       ) {
         text += question;
       } else if (reason === "final") {
+        text += period;
+      } else if (reason === "length") {
+        // A length cut is a sentence break, not a clause break. Ending it
+        // with a comma left the side panel with 70+ char runs that never
+        // triggered a sentence boundary, so rows merged into one long block.
         text += period;
       } else {
         text += comma;
@@ -1225,40 +1299,66 @@ async function punctuateTimedSegmentsWithLocalService(
   const base = resolveLocalPunctuationBase(settings);
   if (!base) return null;
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 60_000);
-  try {
-    const response = await fetch(`${base}/v1/punctuation/timed`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        segments: entries.map((entry) => ({
-          text: String(entry?.text || ""),
-          start: Math.max(0, Number(entry?.start) || 0),
-          end:
-            Math.max(0, Number(entry?.start) || 0) +
-            Math.max(0, Number(entry?.duration) || 0),
-        })),
-        language,
-      }),
-      signal: controller.signal,
-    });
-    if (!response.ok) return null;
-    const payload = await response.json();
-    if (
-      !Array.isArray(payload.segments) ||
-      payload.segments.length !== entries.length ||
-      payload.segments.some(
-        (segment) => !segment || typeof segment.text !== "string",
-      )
-    ) {
+  const requestBody = JSON.stringify({
+    segments: entries.map((entry) => ({
+      text: String(entry?.text || ""),
+      start: Math.max(0, Number(entry?.start) || 0),
+      end:
+        Math.max(0, Number(entry?.start) || 0) +
+        Math.max(0, Number(entry?.duration) || 0),
+    })),
+    language,
+  });
+  const sourceText = entries.map((entry) => String(entry?.text || "")).join("");
+  const deadline = Date.now() + PUNCTUATION_WARMUP_TIMEOUT_MS;
+
+  // After the local service restarts it holds the request until the
+  // punctuation model finishes loading. Without this wait the very first
+  // video after a restart silently fell back to the comma heuristic and that
+  // degraded transcript was then cached for the full 30 day window.
+  for (;;) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60_000);
+    try {
+      const response = await fetch(`${base}/v1/punctuation/timed`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: requestBody,
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const warming = response.status === 503;
+        if (warming && Date.now() < deadline) {
+          clearTimeout(timeoutId);
+          await new Promise((resolve) =>
+            setTimeout(resolve, PUNCTUATION_WARMUP_INTERVAL_MS),
+          );
+          continue;
+        }
+        return null;
+      }
+      const payload = await response.json();
+      if (
+        !Array.isArray(payload.segments) ||
+        payload.segments.length === 0 ||
+        payload.segments.some(
+          (segment) => !segment || typeof segment.text !== "string",
+        )
+      ) {
+        return null;
+      }
+      const returnedText = payload.segments
+        .map((segment) => String(segment.text || ""))
+        .join("");
+      if (!punctuationResultLooksComplete(sourceText, returnedText)) {
+        return null;
+      }
+      return payload.segments;
+    } catch (_error) {
       return null;
+    } finally {
+      clearTimeout(timeoutId);
     }
-    return payload.segments;
-  } catch (_error) {
-    return null;
-  } finally {
-    clearTimeout(timeoutId);
   }
 }
 

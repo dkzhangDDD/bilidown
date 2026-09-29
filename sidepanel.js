@@ -2043,6 +2043,19 @@ async function evictOldCacheEntries(maxEntries) {
 }
 
 /**
+ * True when a cached transcript carries no terminal punctuation at all across
+ * a long body of text. Those entries were produced while the local
+ * punctuation model was still warming up, so the side panel rendered them as
+ * one unpunctuated block. Dropping them forces a clean re-fetch.
+ */
+function isDegradedTranscript(entries) {
+  if (!Array.isArray(entries) || entries.length < 4) return false;
+  const joined = entries.map((entry) => String(entry?.text || "")).join("");
+  if (joined.length < 200) return false;
+  return !/[。！？!?…]/.test(joined);
+}
+
+/**
  * Loads digest results from persistent local storage.
  * Returns null if not cached or expired (30-day expiry).
  */
@@ -2054,6 +2067,11 @@ async function loadFromCache(videoId) {
     const cached = result[`bilidown_${videoId}`];
 
     if (!cached) return null;
+
+    if (isDegradedTranscript(cached.transcript)) {
+      await chrome.storage.local.remove(`bilidown_${videoId}`);
+      return null;
+    }
 
     const storedSettings = await chrome.storage.local.get(YTD_SETTINGS.STORAGE_KEY);
     const settings = YTD_SETTINGS.normalize(
